@@ -111,13 +111,18 @@ All artifacts are hosted on HuggingFace at [`Goodeat/drifting`](https://huggingf
 conda create -n drifting-release python=3.10 -y
 conda activate drifting-release
 pip install -r requirements.txt
-export JAX_PLATFORMS=tpu,cpu
+export JAX_PLATFORMS=cpu
 ```
 
-For local TPU runs, keep `JAX_PLATFORMS=tpu,cpu` in the shell before running
-latent-cache building, training, or evaluation. This keeps TPU as the default
-backend while still exposing a CPU backend for Flax VAE / checkpoint restore
-paths that expect it.
+For local CPU/GPU runs, keep `JAX_PLATFORMS=cpu` (or unset it and let JAX pick).
+
+For local TPU runs, install TPU extras separately, then prefer TPU in the
+platform list:
+
+```bash
+pip install "jax[tpu]==0.4.36" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+export JAX_PLATFORMS=tpu,cpu
+```
 
 ### Download ImageNet
 

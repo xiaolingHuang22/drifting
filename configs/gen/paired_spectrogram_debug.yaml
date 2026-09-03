@@ -1,0 +1,116 @@
+hsdp_dim: 1
+
+logging:
+  project: "drifting-paired-spectrogram-debug"
+  entity: ""
+  use_wandb: false
+  log_every_k: 10
+  console_preview_keys:
+    - g_norm
+    - loss
+    - loss_drift
+    - loss_pair
+    - loss_0.2/global
+    - lr
+
+# Paired conditional spectrogram dataset.
+# Expected image layout:
+#   residual_path/<patient>/<patient>_<channel>_residual.png
+# Expected CSV columns:
+#   patient_channel,pair,x1,y1,z1,x2,y2,z2
+# Optional true-target column for supervised pair loss:
+#   target_true  OR  ps_lr  OR  target_patient_channel
+# where patient/channel fields are formatted as: patient,channel
+dataset:
+  mode: paired_spectrogram
+  residual_path: "/path/to/residual_pngs"
+  train_table_path: "/path/to/train_pairs.csv"
+  val_table_path: "/path/to/val_pairs.csv"
+  resolution: 256
+  use_aug: false
+  use_hflip: false
+  use_latent: false
+  use_cache: false
+  num_classes: 1
+  batch_size: 16
+  eval_batch_size: 16
+  k_neg: 4
+  coordinate_tolerance: 0.00001
+  kwargs:
+    num_workers: 0
+    pin_memory: false
+    prefetch_factor: 2
+
+model:
+  cond_dim: 256
+  input_size: 256
+  # Conditional channel concat: 3 noise channels + 3 source spectrogram channels.
+  in_channels: 6
+  noise_in_channels: 3
+  source_in_channels: 3
+  out_channels: 3
+  use_coord_cond: true
+  coord_dim: 3
+  patch_size: 16
+  hidden_size: 256
+  depth: 4
+  num_heads: 4
+  mlp_ratio: 4.0
+  use_qknorm: true
+  use_swiglu: true
+  use_rope: true
+  use_rmsnorm: true
+  n_cls_tokens: 4
+  noise_classes: 16
+  noise_coords: 16
+  use_bf16: false
+  attn_fp32: true
+  use_remat: false
+
+optimizer:
+  lr_schedule:
+    learning_rate: 0.000001
+    warmup_steps: 50
+    lr_schedule: "const"
+    total_steps: 200
+  weight_decay: 0.01
+  adam_b1: 0.9
+  adam_b2: 0.95
+
+train:
+  conditional: true
+  train_batch_size: 16
+  seed: 42
+  total_steps: 200
+  save_per_step: 100
+  keep_every: 100
+  keep_last: 2
+  enable_eval: false
+  sanity_eval_at_step1: false
+  enable_val_loss: false
+  val_loss_per_step: 100
+  val_loss_batches: 1
+  log_gen_diagnostics: true
+  log_update_diagnostics: false
+  max_grad_norm: 1.0
+  # Drift objective weight and optional supervised pixel loss weight.
+  # Keep lambda_pair at 0 unless your CSV includes target_true / ps_lr.
+  lambda_drift: 1.0
+  lambda_pair: 0.0
+  forward_dict:
+    gen_per_label: 2
+  activation_kwargs:
+    patch_mean_size: [2]
+    patch_std_size: [2]
+    use_std: true
+    use_mean: true
+    every_k_block: 2
+  loss_kwargs:
+    R_list: [0.2]
+  ema_decay: 0.999
+  init_from: ""
+
+feature:
+  mae_path: "hf://mae_pixel_640"
+  use_convnext: false
+  use_mae: true
