@@ -34,7 +34,11 @@ def put_like(tree: Any, template: Any) -> Any:
     return jax.tree.map(_put, tree, template)
 
 
-def _load_local_init_entry(path: str) -> Tuple[Any, Dict[str, Any]]:
+def _load_local_init_entry(
+    path: str,
+    *,
+    checkpoint_step: int | None = None,
+) -> Tuple[Any, Dict[str, Any]]:
     artifact_dir = resolve_artifact_dir(path)
     metadata_path = artifact_dir / "metadata.json"
     params_path = artifact_dir / "ema_params.msgpack"
@@ -53,9 +57,15 @@ def _load_local_init_entry(path: str) -> Tuple[Any, Dict[str, Any]]:
         params = flax.serialization.msgpack_restore(legacy_params_path.read_bytes())
         return params, {}
 
-    restored = checkpoints.restore_checkpoint(str(artifact_dir), target=None, step=None)
+    restored = checkpoints.restore_checkpoint(
+        str(artifact_dir),
+        target=None,
+        step=checkpoint_step,
+    )
+    if isinstance(restored, dict) and "ema_params" in restored:
+        return restored["ema_params"], {"step": checkpoint_step}
     if isinstance(restored, dict) and "params" in restored:
-        return restored["params"], {}
+        return restored["params"], {"step": checkpoint_step}
 
     raise ValueError(
         "Local init_from must be an artifact or checkpoint dir with params: "
@@ -128,6 +138,8 @@ def load_generator_model_and_params(
     init_from: str,
     *,
     hf_cache_dir: str = HF_ROOT,
+    model_config: Dict[str, Any] | None = None,
+    checkpoint_step: int | None = None,
 ) -> Tuple[Any, Any, Dict[str, Any]]:
     """Load a generator model+params pair from ``hf://...`` or a local artifact path.
 
@@ -148,13 +160,18 @@ def load_generator_model_and_params(
         params = params["params"] if isinstance(params, dict) and "params" in params else params
         return model, params, metadata
 
-    params, metadata = _load_local_init_entry(init_from)
-    model_cfg = dict(metadata.get("model_config", {}) or {})
+    params, metadata = _load_local_init_entry(
+        init_from,
+        checkpoint_step=checkpoint_step,
+    )
+    model_cfg = dict(metadata.get("model_config", {}) or model_config or {})
     if not model_cfg:
         raise ValueError(
             f"missing metadata.model_config: local artifact at {Path(init_from).resolve()} "
-            "cannot be restored without model_config in metadata.json"
+            "cannot be restored without model_config in metadata.json; pass the "
+            "training config when loading a raw checkpoint"
         )
+    metadata = {**metadata, "model_config": model_cfg}
     from models.generator import build_generator_from_config
 
     model = build_generator_from_config(model_cfg)
