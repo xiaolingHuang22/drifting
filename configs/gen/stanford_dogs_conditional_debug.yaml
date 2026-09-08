@@ -23,8 +23,9 @@ dataset:
   mode: conditional_imagefolder
   # Contains train/, val/, and test/, each with the same breed subfolders.
   data_path: "~/StanfordDogs_split"
-  # All train/val/test images are scaled to [0,1], resized to this square size,
-  # and training images are augmented after resizing.
+  # One global min/max is measured across train, val, and test and cached as
+  # .conditional_image_minmax.json. Images are min-max normalized to [0,1],
+  # resized to this square size, and training images are then augmented.
   resolution: 32
   use_aug: true
   use_hflip: true

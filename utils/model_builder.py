@@ -4,7 +4,10 @@ import jax
 import optax
 
 from dataset.dataset import create_imagenet_split
-from dataset.conditional_imagefolder import create_conditional_imagefolder_split
+from dataset.conditional_imagefolder import (
+    compute_dataset_min_max,
+    create_conditional_imagefolder_split,
+)
 from dataset.paired_spectrogram import create_paired_spectrogram_split
 from utils.logging import WandbLogger
 from utils.misc import EasyDict
@@ -97,6 +100,11 @@ def build_model_dict(config, model_class, *, workdir: str = "runs"):
         k_neg = int(config.dataset.get("k_neg", 4))
         condition_sets_per_target = int(config.dataset.get("condition_sets_per_target", 1))
         condition_channels = int(config.dataset.get("condition_channels", 3))
+        normalization_min, normalization_max = compute_dataset_min_max(data_path)
+        print(
+            "Conditional dataset-wide min-max normalization: "
+            f"minimum={normalization_min:.8g}, maximum={normalization_max:.8g}"
+        )
         expected_source_channels = k_conditions * condition_channels
         if int(config.model.get("input_size", resolution)) != resolution:
             raise ValueError(
@@ -130,6 +138,8 @@ def build_model_dict(config, model_class, *, workdir: str = "runs"):
             k_neg=k_neg,
             condition_sets_per_target=condition_sets_per_target,
             seed=split_seed,
+            normalization_min=normalization_min,
+            normalization_max=normalization_max,
             **dataset_kwargs,
         )
         eval_loader, _, _ = create_conditional_imagefolder_split(
@@ -144,6 +154,8 @@ def build_model_dict(config, model_class, *, workdir: str = "runs"):
             k_neg=k_neg,
             condition_sets_per_target=condition_sets_per_target,
             seed=split_seed,
+            normalization_min=normalization_min,
+            normalization_max=normalization_max,
             **dataset_kwargs,
         )
         if train_loader.dataset.class_names != eval_loader.dataset.class_names:

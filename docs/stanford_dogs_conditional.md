@@ -141,3 +141,12 @@ embedding and cause a Flax `ScopeParamShapeError`.
 For a condition-use check, keep `--seed` fixed and repeat the command with a
 different breed's `--condition-dir`. The output breed should change with the
 conditions. Do not use images from `train` or `val` for this final test.
+
+### Dataset-wide normalization
+
+The conditional ImageFolder loader scans images under `train/`, `val/`, and
+`test/` once and measures a single global RGB pixel minimum and maximum. Every
+image is then normalized with `(pixel - minimum) / (maximum - minimum)` before
+resizing, ensuring a shared `[0, 1]` scale across all splits. The measured values
+are cached in `.conditional_image_minmax.json` at the dataset root; delete this
+file after adding or replacing images so the statistics are recomputed.

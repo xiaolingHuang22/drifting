@@ -23,7 +23,11 @@ import numpy as np
 from PIL import Image
 
 from dataset.dataset import get_postprocess_fn
-from dataset.conditional_imagefolder import IMAGE_EXTENSIONS
+from dataset.conditional_imagefolder import (
+    IMAGE_EXTENSIONS,
+    build_conditional_image_transform,
+    compute_dataset_min_max,
+)
 from inference import _is_latent, generate_step
 from utils.env import HF_ROOT
 from utils.hsdp_util import ddp_shard, set_global_mesh
@@ -72,6 +76,8 @@ def _load_condition_image(
     image_size: int,
     channels: int,
     pixel_range: str,
+    normalization_min: float = 0.0,
+    normalization_max: float = 1.0,
 ) -> jnp.ndarray:
     """Load one condition image with the validation transform used in training."""
     if channels not in (1, 3):
@@ -82,12 +88,17 @@ def _load_condition_image(
     path = Path(path).expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(f"Condition image does not exist: {path}")
+    transform = build_conditional_image_transform(
+        image_size,
+        split="test",
+        use_aug=False,
+        use_hflip=False,
+        normalization_min=normalization_min,
+        normalization_max=normalization_max,
+    )
     with Image.open(path) as image:
-        image = image.convert("L" if channels == 1 else "RGB")
-        image = image.resize((image_size, image_size), resample=Image.Resampling.BICUBIC)
-        arr = np.asarray(image, dtype=np.float32) / 255.0
-    if channels == 1:
-        arr = arr[..., None]
+        tensor = transform(image.convert("L" if channels == 1 else "RGB"))
+    arr = np.asarray(tensor, dtype=np.float32).transpose(1, 2, 0)
     if pixel_range == "minus_one_one":
         arr = arr * 2.0 - 1.0
     elif pixel_range != "zero_one":
@@ -256,9 +267,14 @@ def main() -> None:
     set_global_mesh(hsdp)
 
     config_model = None
+    normalization_min, normalization_max = 0.0, 1.0
     if args.config is not None:
         config = load_config(args.config)
         config_model = dict(config.model)
+        if str(config.dataset.get("mode", "")).lower() == "conditional_imagefolder":
+            normalization_min, normalization_max = compute_dataset_min_max(
+                config.dataset.data_path
+            )
         # Training injects dataset.num_classes when constructing DitGen rather
         # than storing it under config.model. Raw checkpoints have no artifact
         # metadata, so reproduce that injection before rebuilding the model.
@@ -320,6 +336,8 @@ def main() -> None:
                 image_size=image_size,
                 channels=condition_channels,
                 pixel_range=pixel_range,
+                normalization_min=normalization_min,
+                normalization_max=normalization_max,
             )
             for path in condition_paths
         ]
@@ -379,6 +397,8 @@ def main() -> None:
                 image_size=image_size,
                 channels=condition_channels,
                 pixel_range=pixel_range,
+                normalization_min=normalization_min,
+                normalization_max=normalization_max,
             )
             if pixel_range == "minus_one_one":
                 target_preview = (target_preview + 1.0) / 2.0

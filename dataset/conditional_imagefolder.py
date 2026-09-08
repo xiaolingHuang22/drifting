@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from functools import partial
 from pathlib import Path
 from typing import Callable
@@ -29,16 +30,95 @@ class ClampUnitRange:
         return tensor.clamp(0.0, 1.0)
 
 
+class DatasetMinMaxNormalize:
+    """Apply scalar min-max normalization measured over the complete dataset."""
+
+    def __init__(self, minimum: float, maximum: float) -> None:
+        if maximum <= minimum:
+            raise ValueError(
+                "Dataset normalization maximum must be greater than minimum, "
+                f"got minimum={minimum} and maximum={maximum}."
+            )
+        self.minimum = float(minimum)
+        self.scale = float(maximum - minimum)
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        return (tensor - self.minimum) / self.scale
+
+
+def compute_dataset_min_max(
+    data_path: str | Path,
+    *,
+    cache_filename: str = ".conditional_image_minmax.json",
+) -> tuple[float, float]:
+    """Measure one global pixel range over train, val, and test images.
+
+    Values are measured after RGB conversion and expressed in the floating-point
+    range produced by ``ToTensor`` (raw uint8 values divided by 255).  A small
+    JSON cache avoids rescanning the complete dataset every time a loader is
+    constructed. Delete the cache after adding or replacing dataset images.
+    """
+    root = Path(data_path).expanduser().resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"Conditional image dataset does not exist: {root}")
+    cache_path = root / cache_filename
+    if cache_path.is_file():
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        return float(payload["minimum"]), float(payload["maximum"])
+
+    paths = sorted(
+        path
+        for split in ("train", "val", "test")
+        for path in (root / split).rglob("*")
+        if (root / split).is_dir()
+        and path.is_file()
+        and path.suffix.lower() in IMAGE_EXTENSIONS
+    )
+    if not paths:
+        raise ValueError(f"No train/val/test images found under {root}.")
+
+    minimum = 1.0
+    maximum = 0.0
+    for path in paths:
+        with Image.open(path) as image:
+            tensor = transforms.functional.pil_to_tensor(image.convert("RGB"))
+        minimum = min(minimum, float(tensor.min()) / 255.0)
+        maximum = max(maximum, float(tensor.max()) / 255.0)
+    if maximum <= minimum:
+        raise ValueError(
+            f"Dataset-wide min-max normalization needs a non-constant dataset; "
+            f"measured minimum={minimum}, maximum={maximum} under {root}."
+        )
+
+    cache_path.write_text(
+        json.dumps(
+            {
+                "minimum": minimum,
+                "maximum": maximum,
+                "image_count": len(paths),
+                "splits": ["train", "val", "test"],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return minimum, maximum
+
+
 def build_conditional_image_transform(
     resolution: int,
     *,
     split: str,
     use_aug: bool,
     use_hflip: bool,
+    normalization_min: float = 0.0,
+    normalization_max: float = 1.0,
 ) -> Callable[[Image.Image], torch.Tensor]:
-    """Scale to [0, 1], resize, then optionally augment training images."""
+    """Apply dataset-wide min-max normalization, resize, then augment training images."""
     ops: list[Callable] = [
         transforms.ToTensor(),
+        DatasetMinMaxNormalize(normalization_min, normalization_max),
         transforms.Resize(
             (resolution, resolution),
             interpolation=InterpolationMode.BICUBIC,
@@ -261,17 +341,25 @@ def create_conditional_imagefolder_split(
     condition_sets_per_target: int = 1,
     use_aug: bool = False,
     use_hflip: bool = False,
+    normalization_min: float | None = None,
+    normalization_max: float | None = None,
     seed: int = 42,
     num_workers: int = 4,
     prefetch_factor: int = 2,
     pin_memory: bool = False,
 ):
     """Create a conditional ImageFolder loader for one train/val/test split."""
+    if normalization_min is None or normalization_max is None:
+        measured_min, measured_max = compute_dataset_min_max(data_path)
+        normalization_min = measured_min if normalization_min is None else normalization_min
+        normalization_max = measured_max if normalization_max is None else normalization_max
     transform = build_conditional_image_transform(
         resolution=resolution,
         split=split,
         use_aug=use_aug,
         use_hflip=use_hflip,
+        normalization_min=normalization_min,
+        normalization_max=normalization_max,
     )
     dataset = ConditionalImageFolderDataset(
         Path(data_path) / split,
