@@ -435,8 +435,20 @@ def build_activation_function(
     use_convnext=False,
     convnext_bf16=False,
     use_mae=True,
+    include_raw_global=True,
+    input_range="minus_one_one",
     postprocess_fn=lambda x: x,
 ):
+    if input_range not in {"minus_one_one", "zero_one"}:
+        raise ValueError(
+            "input_range must be 'minus_one_one' or 'zero_one', "
+            f"got {input_range!r}."
+        )
+    if not include_raw_global and not use_mae and not use_convnext:
+        raise ValueError(
+            "At least one drift feature must be enabled: set include_raw_global=true, "
+            "use_mae=true, or use_convnext=true."
+        )
     variables = dict()
     if use_mae:
         feature_model, feature_params = build_feature_model_and_params(
@@ -453,12 +465,19 @@ def build_activation_function(
 
     def activation_fn(params, x, convnext_kwargs=dict(), has_scale=False, **kwargs):
         usual_feats = dict()
-        usual_feats["global"] = x.reshape(x.shape[0], 1, -1)
+        if include_raw_global:
+            # Raw flattened pixels are useful for spatially aligned data, but can
+            # encourage patch/color averaging for unaligned natural images.
+            usual_feats["global"] = x.reshape(x.shape[0], 1, -1)
         if has_scale:
             usual_feats["norm_x"] = jnp.sqrt((x ** 2).mean(axis=(1, 2)) + 1e-6)[:, None, :]
 
         if use_mae:
-            mae_feats = feature_model.apply({"params": params["mae_params"]}, x, method=feature_model.get_activations, **kwargs)
+            # Released pixel MAE checkpoints were trained on [-1, 1] tensors.
+            # Conditional ImageFolder data remains [0, 1] in model space, so
+            # adapt only the frozen feature extractor's input here.
+            mae_x = x * 2.0 - 1.0 if input_range == "zero_one" else x
+            mae_feats = feature_model.apply({"params": params["mae_params"]}, mae_x, method=feature_model.get_activations, **kwargs)
             usual_feats = {**usual_feats, **mae_feats}
 
         if use_convnext:

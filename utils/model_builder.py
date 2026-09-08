@@ -4,6 +4,8 @@ import jax
 import optax
 
 from dataset.dataset import create_imagenet_split
+from dataset.conditional_imagefolder import create_conditional_imagefolder_split
+from dataset.paired_spectrogram import create_paired_spectrogram_split
 from utils.logging import WandbLogger
 from utils.misc import EasyDict
 
@@ -15,8 +17,9 @@ def create_learning_rate_fn(
     lr_schedule="const",
 ):
     """Create warmup + main learning-rate schedule."""
+    warmup_init_value = min(1e-6, learning_rate)
     warmup_fn = optax.linear_schedule(
-        init_value=1e-6,
+        init_value=warmup_init_value,
         end_value=learning_rate,
         transition_steps=warmup_steps,
     )
@@ -50,28 +53,155 @@ def build_model_dict(config, model_class, *, workdir: str = "runs"):
     batch_size_per_node = config.dataset.batch_size // jax.process_count()
     resolution = int(config.dataset.resolution)
     use_aug = bool(config.dataset.get("use_aug", False))
+    use_hflip = bool(config.dataset.get("use_hflip", True))
     use_latent = bool(config.dataset.get("use_latent", False))
     use_cache = bool(config.dataset.get("use_cache", False))
 
-    train_loader, preprocess_fn, postprocess_fn = create_imagenet_split(
-        resolution=resolution,
-        use_aug=use_aug,
-        use_latent=use_latent,
-        use_cache=use_cache,
-        batch_size=batch_size_per_node,
-        split="train",
-        **config.dataset.kwargs,
-    )
+    dataset_mode = str(config.dataset.get("mode", "imagenet")).lower()
+    dataset_kwargs = dict(config.dataset.get("kwargs", {}))
+    if dataset_mode in {"imagenet", "imagefolder"}:
+        train_loader, preprocess_fn, postprocess_fn = create_imagenet_split(
+            resolution=resolution,
+            use_aug=use_aug,
+            use_hflip=use_hflip,
+            use_latent=use_latent,
+            use_cache=use_cache,
+            batch_size=batch_size_per_node,
+            split="train",
+            **dataset_kwargs,
+        )
 
-    eval_loader, _, _ = create_imagenet_split(
-        resolution=resolution,
-        use_aug=use_aug,
-        use_latent=use_latent,
-        use_cache=use_cache,
-        batch_size=config.dataset.eval_batch_size // jax.process_count(),
-        split="val",
-        **config.dataset.kwargs,
-    )
+        eval_loader, _, _ = create_imagenet_split(
+            resolution=resolution,
+            use_aug=use_aug,
+            use_hflip=use_hflip,
+            use_latent=use_latent,
+            use_cache=use_cache,
+            batch_size=config.dataset.eval_batch_size // jax.process_count(),
+            split="val",
+            **dataset_kwargs,
+        )
+        dataset_name = f"imagenet{resolution}"
+    elif dataset_mode == "conditional_imagefolder":
+        if use_latent or use_cache:
+            raise ValueError(
+                "dataset.mode=conditional_imagefolder currently supports pixel-space loading only."
+            )
+        data_path = config.dataset.get("data_path", None)
+        if data_path is None:
+            raise ValueError(
+                "dataset.data_path is required when dataset.mode=conditional_imagefolder."
+            )
+        k_conditions = int(config.dataset.get("k_conditions", 4))
+        k_positive = int(config.dataset.get("k_positive", 4))
+        k_neg = int(config.dataset.get("k_neg", 4))
+        condition_sets_per_target = int(config.dataset.get("condition_sets_per_target", 1))
+        condition_channels = int(config.dataset.get("condition_channels", 3))
+        expected_source_channels = k_conditions * condition_channels
+        if int(config.model.get("input_size", resolution)) != resolution:
+            raise ValueError(
+                "Conditional image size mismatch: dataset.resolution must equal "
+                "model.input_size."
+            )
+        if int(config.model.get("source_in_channels", 0)) != expected_source_channels:
+            raise ValueError(
+                "Conditional channel concatenation requires "
+                f"model.source_in_channels={expected_source_channels} for "
+                f"k_conditions={k_conditions} and condition_channels={condition_channels}."
+            )
+        expected_input_channels = expected_source_channels + int(
+            config.model.get("noise_in_channels", 0)
+        )
+        if int(config.model.get("in_channels", 0)) != expected_input_channels:
+            raise ValueError(
+                "Conditional generator channel mismatch: model.in_channels must equal "
+                "model.noise_in_channels + model.source_in_channels."
+            )
+        split_seed = int(config.dataset.get("seed", config.train.get("seed", 42)))
+        train_loader, preprocess_fn, postprocess_fn = create_conditional_imagefolder_split(
+            data_path=data_path,
+            resolution=resolution,
+            use_aug=use_aug,
+            use_hflip=use_hflip,
+            batch_size=batch_size_per_node,
+            split="train",
+            k_conditions=k_conditions,
+            k_positive=k_positive,
+            k_neg=k_neg,
+            condition_sets_per_target=condition_sets_per_target,
+            seed=split_seed,
+            **dataset_kwargs,
+        )
+        eval_loader, _, _ = create_conditional_imagefolder_split(
+            data_path=data_path,
+            resolution=resolution,
+            use_aug=False,
+            use_hflip=False,
+            batch_size=config.dataset.eval_batch_size // jax.process_count(),
+            split="val",
+            k_conditions=k_conditions,
+            k_positive=k_positive,
+            k_neg=k_neg,
+            condition_sets_per_target=condition_sets_per_target,
+            seed=split_seed,
+            **dataset_kwargs,
+        )
+        if train_loader.dataset.class_names != eval_loader.dataset.class_names:
+            raise ValueError(
+                "conditional_imagefolder train/val class folders must match exactly: "
+                f"train={train_loader.dataset.class_names}, "
+                f"val={eval_loader.dataset.class_names}."
+            )
+        dataset_name = f"conditional_imagefolder{resolution}"
+    elif dataset_mode == "paired_spectrogram":
+        if use_latent or use_cache:
+            raise ValueError(
+                "dataset.mode=paired_spectrogram currently supports pixel-space loading only."
+            )
+        residual_path = config.dataset.get("residual_path", None)
+        train_table_path = config.dataset.get(
+            "train_table_path",
+            config.dataset.get("table_path", None),
+        )
+        val_table_path = config.dataset.get("val_table_path", train_table_path)
+        if residual_path is None:
+            raise ValueError(
+                "dataset.residual_path is required when dataset.mode=paired_spectrogram."
+            )
+        if train_table_path is None:
+            raise ValueError(
+                "dataset.train_table_path or dataset.table_path is required "
+                "when dataset.mode=paired_spectrogram."
+            )
+        k_neg = int(config.dataset.get("k_neg", config.train.get("neg_per_sample", 4)))
+        coordinate_tolerance = float(config.dataset.get("coordinate_tolerance", 1e-5))
+        train_loader, preprocess_fn, postprocess_fn = create_paired_spectrogram_split(
+            residual_path=residual_path,
+            table_path=train_table_path,
+            resolution=resolution,
+            use_aug=use_aug,
+            use_hflip=use_hflip,
+            batch_size=batch_size_per_node,
+            split="train",
+            k_neg=k_neg,
+            coordinate_tolerance=coordinate_tolerance,
+            **dataset_kwargs,
+        )
+        eval_loader, _, _ = create_paired_spectrogram_split(
+            residual_path=residual_path,
+            table_path=val_table_path,
+            resolution=resolution,
+            use_aug=False,
+            use_hflip=False,
+            batch_size=config.dataset.eval_batch_size // jax.process_count(),
+            split="val",
+            k_neg=k_neg,
+            coordinate_tolerance=coordinate_tolerance,
+            **dataset_kwargs,
+        )
+        dataset_name = f"paired_spectrogram{resolution}"
+    else:
+        raise ValueError(f"Unsupported dataset.mode={dataset_mode!r}.")
 
     learning_rate_fn = create_learning_rate_fn(**config.optimizer.lr_schedule)
 
@@ -101,7 +231,7 @@ def build_model_dict(config, model_class, *, workdir: str = "runs"):
         logger=logger,
         eval_loader=eval_loader,
         train_loader=train_loader,
-        dataset_name=f"imagenet{resolution}",
+        dataset_name=dataset_name,
         preprocess_fn=preprocess_fn,
         postprocess_fn=postprocess_fn,
         train=config.train,

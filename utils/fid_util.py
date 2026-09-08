@@ -63,6 +63,7 @@ def _to_local_cpu(jax_array):
 
 def _to_uint8(samples):
     """Convert float ``[0, 1]`` samples to ``uint8 [0, 255]``."""
+    samples = np.asarray(samples, dtype=np.float32)
     samples = np.nan_to_num(samples, nan=0.0, posinf=1.0, neginf=0.0)
     return (samples * 255).clip(0, 255).astype(np.uint8)
 
