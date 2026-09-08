@@ -196,8 +196,10 @@ class WandbLogger:
             log_for_0("Cannot plot losses; metrics file does not exist: %s", metrics_path)
             return None
 
-        train_points: list[tuple[int, float]] = []
-        val_points: list[tuple[int, float]] = []
+        objective_train_points: list[tuple[int, float]] = []
+        objective_val_points: list[tuple[int, float]] = []
+        semantic_train_points: list[tuple[int, float]] = []
+        semantic_val_points: list[tuple[int, float]] = []
         with metrics_path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 try:
@@ -205,12 +207,28 @@ class WandbLogger:
                     step = int(record["step"])
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                     continue
-                train_loss = record.get("loss")
-                val_loss = record.get("val/loss")
-                if isinstance(train_loss, (int, float)) and math.isfinite(train_loss):
-                    train_points.append((step, float(train_loss)))
-                if isinstance(val_loss, (int, float)) and math.isfinite(val_loss):
-                    val_points.append((step, float(val_loss)))
+                for key, points in (
+                    ("loss", objective_train_points),
+                    ("val/loss", objective_val_points),
+                    ("semantic_loss", semantic_train_points),
+                    ("val/semantic_loss", semantic_val_points),
+                ):
+                    value = record.get(key)
+                    if isinstance(value, (int, float)) and math.isfinite(value):
+                        points.append((step, float(value)))
+
+        if semantic_train_points:
+            train_points = semantic_train_points
+            val_points = semantic_val_points
+            train_label = "train/semantic_loss"
+            val_label = "val/semantic_loss"
+            title = "Training and validation semantic monitor loss"
+        else:
+            train_points = objective_train_points
+            val_points = objective_val_points
+            train_label = "train/loss"
+            val_label = "val/loss"
+            title = "Training and validation loss"
 
         all_points = train_points + val_points
         if not all_points:
@@ -264,10 +282,10 @@ class WandbLogger:
             x, y = xy(val_points[0])
             draw.ellipse((x - 3, y - 3, x + 3, y + 3), fill=(214, 39, 40))
 
-        draw.text((left, 15), "Training and validation loss", fill="black")
+        draw.text((left, 15), title, fill="black")
         draw.text((left + plot_width / 2 - 20, height - 25), "step", fill="black")
-        draw.text((left + 15, 28), "train/loss", fill=(31, 119, 180))
-        draw.text((left + 105, 28), "val/loss", fill=(214, 39, 40))
+        draw.text((left + 15, 28), train_label, fill=(31, 119, 180))
+        draw.text((left + 180, 28), val_label, fill=(214, 39, 40))
         output_path = self.offline_dir / filename
         image.save(output_path)
         log_for_0("Saved loss plot to %s", output_path)

@@ -99,6 +99,9 @@ def build_model_dict(config, model_class, *, workdir: str = "runs"):
         k_positive = int(config.dataset.get("k_positive", 4))
         k_neg = int(config.dataset.get("k_neg", 4))
         condition_sets_per_target = int(config.dataset.get("condition_sets_per_target", 1))
+        augmented_copies_per_image = int(
+            config.dataset.get("augmented_copies_per_image", 0)
+        )
         condition_channels = int(config.dataset.get("condition_channels", 3))
         normalization_min, normalization_max = compute_dataset_min_max(data_path)
         print(
@@ -137,6 +140,7 @@ def build_model_dict(config, model_class, *, workdir: str = "runs"):
             k_positive=k_positive,
             k_neg=k_neg,
             condition_sets_per_target=condition_sets_per_target,
+            augmented_copies_per_image=augmented_copies_per_image,
             seed=split_seed,
             normalization_min=normalization_min,
             normalization_max=normalization_max,
@@ -153,6 +157,7 @@ def build_model_dict(config, model_class, *, workdir: str = "runs"):
             k_positive=k_positive,
             k_neg=k_neg,
             condition_sets_per_target=condition_sets_per_target,
+            augmented_copies_per_image=0,
             seed=split_seed,
             normalization_min=normalization_min,
             normalization_max=normalization_max,

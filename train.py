@@ -414,15 +414,38 @@ def train_step_conditional(
                 weight_neg=jnp.ones_like(feature_neg[:, :, 0]),
                 **loss_kwargs,
             )
+            # Unlike the normalized drift objective, this auxiliary metric has a
+            # meaningful scale: lower means generated features have greater cosine
+            # similarity to positives than to negatives. It is not differentiated.
+            eps = 1e-6
+            gen_unit = feature_gen / jnp.clip(
+                jnp.linalg.norm(feature_gen, axis=-1, keepdims=True), a_min=eps
+            )
+            pos_unit = feature_pos / jnp.clip(
+                jnp.linalg.norm(feature_pos, axis=-1, keepdims=True), a_min=eps
+            )
+            neg_unit = feature_neg / jnp.clip(
+                jnp.linalg.norm(feature_neg, axis=-1, keepdims=True), a_min=eps
+            )
+            pos_similarity = jnp.einsum("bgd,bpd->bgp", gen_unit, pos_unit).mean()
+            neg_similarity = jnp.einsum("bgd,bnd->bgn", gen_unit, neg_unit).mean()
+            semantic_loss = jax.nn.softplus((neg_similarity - pos_similarity) / 0.1)
+            info = dict(info)
+            info["semantic_loss"] = jax.lax.stop_gradient(semantic_loss)
             return loss, info
 
         loss_per_feature = jax.tree.map(feature_loss, pos_features, neg_features, gen_features)
         drift_loss_total = 0
+        semantic_loss_total = 0
+        semantic_loss_count = 0
         total_info = dict()
         for key, value in loss_per_feature.items():
             drift_loss_total = drift_loss_total + value[0].mean()
             for info_key, info_value in value[1].items():
                 total_info[f"{info_key}/{key}"] = info_value
+                if info_key == "semantic_loss":
+                    semantic_loss_total = semantic_loss_total + info_value
+                    semantic_loss_count += 1
         drift_loss_total = drift_loss_total.mean()
         pair_loss = jnp.array(0.0, dtype=jnp.float32)
         if lambda_pair > 0.0 and "target_true" in batch:
@@ -438,6 +461,7 @@ def train_step_conditional(
         total_info = jax.tree.map(lambda x: x.mean(), total_info)
         total_info["loss_drift"] = drift_loss_total
         total_info["loss_pair"] = pair_loss
+        total_info["semantic_loss"] = semantic_loss_total / max(semantic_loss_count, 1)
         if log_gen_diagnostics:
             total_info["gen_is_finite"] = gen_finite.all().astype(jnp.float32)
             total_info["gen_nonfinite"] = gen_nonfinite.astype(jnp.float32)

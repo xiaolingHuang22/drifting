@@ -173,19 +173,23 @@ class ConditionalImageFolderDataset(torch.utils.data.Dataset):
         root: str | Path,
         *,
         transform: Callable[[Image.Image], torch.Tensor],
+        clean_transform: Callable[[Image.Image], torch.Tensor] | None = None,
         k_conditions: int = 4,
         k_positive: int = 4,
         k_neg: int = 4,
         condition_sets_per_target: int = 1,
+        augmented_copies_per_image: int = 0,
         deterministic: bool = False,
         seed: int = 42,
     ) -> None:
         self.root = Path(root).expanduser().resolve()
-        self.transform = transform
+        self.augmented_transform = transform
+        self.clean_transform = clean_transform or transform
         self.k_conditions = int(k_conditions)
         self.k_positive = int(k_positive)
         self.k_neg = int(k_neg)
         self.condition_sets_per_target = int(condition_sets_per_target)
+        self.augmented_copies_per_image = int(augmented_copies_per_image)
         self.deterministic = bool(deterministic)
         self.seed = int(seed)
 
@@ -201,6 +205,11 @@ class ConditionalImageFolderDataset(torch.utils.data.Dataset):
             raise ValueError(
                 "condition_sets_per_target must be positive, got "
                 f"{self.condition_sets_per_target}."
+            )
+        if self.augmented_copies_per_image < 0:
+            raise ValueError(
+                "augmented_copies_per_image must be non-negative, got "
+                f"{self.augmented_copies_per_image}."
             )
 
         self.class_names = sorted(path.name for path in self.root.iterdir() if path.is_dir())
@@ -241,7 +250,8 @@ class ConditionalImageFolderDataset(torch.utils.data.Dataset):
         }
 
     def __len__(self) -> int:
-        return len(self.targets) * self.condition_sets_per_target
+        variants_per_set = 1 + self.augmented_copies_per_image
+        return len(self.targets) * self.condition_sets_per_target * variants_per_set
 
     def _generator(self, idx: int) -> torch.Generator | None:
         if not self.deterministic:
@@ -263,9 +273,10 @@ class ConditionalImageFolderDataset(torch.utils.data.Dataset):
             return torch.randperm(population, generator=generator)[:count].tolist()
         return torch.randint(population, (count,), generator=generator).tolist()
 
-    def _load_image(self, path: Path) -> torch.Tensor:
+    def _load_image(self, path: Path, *, augmented: bool) -> torch.Tensor:
+        transform = self.augmented_transform if augmented else self.clean_transform
         with Image.open(path) as image:
-            tensor = self.transform(image.convert("RGB"))
+            tensor = transform(image.convert("RGB"))
         if not isinstance(tensor, torch.Tensor):
             raise TypeError(
                 "ConditionalImageFolderDataset transform must return a torch.Tensor, "
@@ -274,8 +285,13 @@ class ConditionalImageFolderDataset(torch.utils.data.Dataset):
         return tensor
 
     def __getitem__(self, idx: int) -> dict[str, object]:
-        target_idx = idx // self.condition_sets_per_target
-        condition_set_index = idx % self.condition_sets_per_target
+        variants_per_set = 1 + self.augmented_copies_per_image
+        entries_per_target = self.condition_sets_per_target * variants_per_set
+        target_idx = idx // entries_per_target
+        target_entry_index = idx % entries_per_target
+        condition_set_index = target_entry_index // variants_per_set
+        augmentation_index = target_entry_index % variants_per_set
+        augmented = augmentation_index > 0
         target_path, class_idx = self.targets[target_idx]
         generator = self._generator(idx)
 
@@ -302,12 +318,18 @@ class ConditionalImageFolderDataset(torch.utils.data.Dataset):
         )
         negative_paths = [negative_pool[index] for index in negative_indices]
 
-        conditions = torch.stack([self._load_image(path) for path in condition_paths])
+        conditions = torch.stack(
+            [self._load_image(path, augmented=augmented) for path in condition_paths]
+        )
         # Concatenate complete RGB conditions on the channel axis: K,C,H,W -> K*C,H,W.
         source = conditions.flatten(0, 1)
-        target_true = self._load_image(target_path)
-        target_ref = torch.stack([self._load_image(path) for path in target_ref_paths])
-        negative = torch.stack([self._load_image(path) for path in negative_paths])
+        target_true = self._load_image(target_path, augmented=augmented)
+        target_ref = torch.stack(
+            [self._load_image(path, augmented=augmented) for path in target_ref_paths]
+        )
+        negative = torch.stack(
+            [self._load_image(path, augmented=augmented) for path in negative_paths]
+        )
 
         return {
             "source": source,
@@ -324,6 +346,8 @@ class ConditionalImageFolderDataset(torch.utils.data.Dataset):
             "label": torch.tensor(0, dtype=torch.int64),
             "breed_index": torch.tensor(class_idx, dtype=torch.int64),
             "condition_set_index": torch.tensor(condition_set_index, dtype=torch.int64),
+            "augmentation_index": torch.tensor(augmentation_index, dtype=torch.int64),
+            "is_augmented": torch.tensor(augmented, dtype=torch.bool),
             "breed": self.class_names[class_idx],
             "target_path": str(target_path),
         }
@@ -339,6 +363,7 @@ def create_conditional_imagefolder_split(
     k_positive: int = 4,
     k_neg: int = 4,
     condition_sets_per_target: int = 1,
+    augmented_copies_per_image: int = 0,
     use_aug: bool = False,
     use_hflip: bool = False,
     normalization_min: float | None = None,
@@ -353,7 +378,15 @@ def create_conditional_imagefolder_split(
         measured_min, measured_max = compute_dataset_min_max(data_path)
         normalization_min = measured_min if normalization_min is None else normalization_min
         normalization_max = measured_max if normalization_max is None else normalization_max
-    transform = build_conditional_image_transform(
+    clean_transform = build_conditional_image_transform(
+        resolution=resolution,
+        split=split,
+        use_aug=False,
+        use_hflip=False,
+        normalization_min=normalization_min,
+        normalization_max=normalization_max,
+    )
+    augmented_transform = build_conditional_image_transform(
         resolution=resolution,
         split=split,
         use_aug=use_aug,
@@ -363,11 +396,15 @@ def create_conditional_imagefolder_split(
     )
     dataset = ConditionalImageFolderDataset(
         Path(data_path) / split,
-        transform=transform,
+        transform=augmented_transform,
+        clean_transform=clean_transform,
         k_conditions=k_conditions,
         k_positive=k_positive,
         k_neg=k_neg,
         condition_sets_per_target=condition_sets_per_target,
+        augmented_copies_per_image=(
+            augmented_copies_per_image if split == "train" and use_aug else 0
+        ),
         deterministic=(split != "train"),
         seed=seed,
     )
@@ -417,6 +454,8 @@ def create_conditional_imagefolder_split(
             "target_coord": jnp.asarray(batch["target_coord"], dtype=jnp.float32),
             "breed_index": jnp.asarray(batch["breed_index"], dtype=jnp.int32),
             "condition_set_index": jnp.asarray(batch["condition_set_index"], dtype=jnp.int32),
+            "augmentation_index": jnp.asarray(batch["augmentation_index"], dtype=jnp.int32),
+            "is_augmented": jnp.asarray(batch["is_augmented"], dtype=jnp.bool_),
         }
 
     def postprocess_fn(images):

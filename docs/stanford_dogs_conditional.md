@@ -150,3 +150,22 @@ image is then normalized with `(pixel - minimum) / (maximum - minimum)` before
 resizing, ensuring a shared `[0, 1]` scale across all splits. The measured values
 are cached in `.conditional_image_minmax.json` at the dataset root; delete this
 file after adding or replacing images so the statistics are recomputed.
+
+### Clean and augmented training entries
+
+Set `dataset.augmented_copies_per_image` to add on-the-fly augmented entries in
+addition to each clean training entry. A value of `2` makes every target and
+condition-set combination appear once with the clean preprocessing pipeline and
+twice with independently sampled training augmentation. These are virtual
+entries and are not written to disk. Validation and test entries are always
+clean, regardless of this setting.
+
+### Semantic monitoring loss
+
+The optimized drifting loss is normalized per feature and can remain close to
+the number of feature entries. Training now also logs `semantic_loss`, a
+non-optimized monitoring metric based on cosine similarity: lower values mean
+generated features are more similar to same-class positives than to other-class
+negatives. The offline loss plot prefers `semantic_loss` and
+`val/semantic_loss`, while retaining the optimized loss as a fallback for older
+runs.
