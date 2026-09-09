@@ -489,6 +489,12 @@ class DitGen(nn.Module):
     noise_coords: int = 1
     input_size: int = 32
     in_channels: int = 3
+    noise_in_channels: int = 0
+    source_in_channels: int = 0
+    pixel_range: str = "minus_one_one"
+    output_activation: str = "identity"
+    use_coord_cond: bool = False
+    coord_dim: int = 3
     n_cls_tokens: int = 0
     patch_size: int = 2
 
@@ -508,17 +514,31 @@ class DitGen(nn.Module):
     use_remat: bool = False
 
     def dummy_input(self):
-        return {
+        inputs = {
             'c': jnp.ones(1, dtype=jnp.int32),
             'cfg_scale': 1.0,
             'temp': 1.0,
             'deterministic': True,
         }
+        if self.source_in_channels > 0:
+            inputs['source'] = jnp.zeros(
+                (1, self.input_size, self.input_size, self.source_in_channels),
+                dtype=jnp.float32,
+            )
+        if self.use_coord_cond:
+            inputs['source_coord'] = jnp.zeros((1, self.coord_dim), dtype=jnp.float32)
+            inputs['target_coord'] = jnp.zeros((1, self.coord_dim), dtype=jnp.float32)
+        return inputs
     
     def rng_keys(self):
         return ['noise']
 
     def setup(self):
+        if self.output_activation not in {"identity", "sigmoid", "tanh"}:
+            raise ValueError(
+                "output_activation must be one of: identity, sigmoid, tanh; "
+                f"got {self.output_activation!r}."
+            )
         dtype = jnp.bfloat16 if self.use_bf16 else jnp.float32
         param_dtype = jnp.float32
         
@@ -549,6 +569,19 @@ class DitGen(nn.Module):
             self.cond_dim,
             name='RMSNorm_0'
         )
+        if self.use_coord_cond:
+            self.coord_embedder = nn.Sequential([
+                TorchLinear(self.cond_dim, bias=True, dtype=dtype, param_dtype=param_dtype),
+                nn.silu,
+                TorchLinear(
+                    self.cond_dim,
+                    bias=True,
+                    weight_init="zeros",
+                    bias_init="zeros",
+                    dtype=dtype,
+                    param_dtype=param_dtype,
+                ),
+            ])
 
         self.model = LightningDiT(
             input_size=self.input_size,
@@ -573,7 +606,12 @@ class DitGen(nn.Module):
         )
 
     def generate_image(self, x, cond, deterministic=True):
-        return self.model(x, cond, deterministic=deterministic)
+        samples = self.model(x, cond, deterministic=deterministic)
+        if self.output_activation == "sigmoid":
+            return jax.nn.sigmoid(samples)
+        if self.output_activation == "tanh":
+            return jnp.tanh(samples)
+        return samples
 
     def c_cfg_noise_to_cond(self, c, cfg_scale, noise_labels):
         B = c.shape[0]
@@ -598,36 +636,82 @@ class DitGen(nn.Module):
             cond = cond.astype(jnp.bfloat16)
         return cond
 
-    def __call__(self, c, cfg_scale=1.0, temp=1.0, deterministic=True, train=False):
+    def __call__(
+        self,
+        c,
+        cfg_scale=1.0,
+        temp=1.0,
+        deterministic=True,
+        train=False,
+        source=None,
+        source_coord=None,
+        target_coord=None,
+    ):
+        del train
         B = c.shape[0]
         # Noise generation
         rng = self.make_rng('noise')
         rng_x, rng_labels = random.split(rng)
         c = enforce_ddp(c)
-        
-        if B % jax.device_count() != 0:
-            x = random.normal(rng_x, (B, self.input_size, self.input_size, self.in_channels))
+
+        if source is not None:
+            source = enforce_ddp(source)
+            noise_channels = self.noise_in_channels or (self.in_channels - source.shape[-1])
         else:
-            x = ddp_rand_func(shard="ddp", rand_type="normal")(rng_x, (B, self.input_size, self.input_size, self.in_channels))
-        x = x * temp + jnp.zeros_like(c, dtype=x.dtype)[:, None, None, None] # move sharding!
+            noise_channels = self.noise_in_channels or self.in_channels
+
+        if noise_channels <= 0:
+            raise ValueError(
+                "Conditional generator requires a positive number of noise channels. "
+                "Set model.noise_in_channels when using model.source_in_channels."
+            )
+
+        noise_shape = (B, self.input_size, self.input_size, noise_channels)
+        if B % jax.device_count() != 0:
+            x_noise = random.normal(rng_x, noise_shape)
+        else:
+            x_noise = ddp_rand_func(shard="ddp", rand_type="normal")(rng_x, noise_shape)
+        x_noise = x_noise * temp + jnp.zeros_like(c, dtype=x_noise.dtype)[:, None, None, None]
+
+        if source is not None:
+            if source.shape[-1] != self.source_in_channels:
+                raise ValueError(
+                    f"Expected source with {self.source_in_channels} channels, "
+                    f"got {source.shape[-1]}."
+                )
+            x = jnp.concatenate([x_noise, source], axis=-1)
+            if x.shape[-1] != self.in_channels:
+                raise ValueError(
+                    f"Noise/source concat produced {x.shape[-1]} channels, "
+                    f"but model.in_channels={self.in_channels}."
+                )
+        else:
+            x = x_noise
 
         if self.use_bf16:
             x = x.astype(jnp.bfloat16)
-            
-        noise_labels = random.randint(rng_labels, (B, max(1, self.noise_coords)), 0, max(1, self.noise_classes)) 
-        noise_labels = noise_labels + jnp.zeros_like(c, dtype=noise_labels.dtype)[:, None] # move sharding!
-        
-        cond = self.c_cfg_noise_to_cond(c, cfg_scale, noise_labels)
 
-        samples = self.generate_image(x, cond, deterministic=deterministic)  # Output is already BHWC
-        
-        noise_dict = {"x": x}
+        noise_labels = random.randint(rng_labels, (B, max(1, self.noise_coords)), 0, max(1, self.noise_classes))
+        noise_labels = noise_labels + jnp.zeros_like(c, dtype=noise_labels.dtype)[:, None]
+
+        cond = self.c_cfg_noise_to_cond(c, cfg_scale, noise_labels)
+        if self.use_coord_cond:
+            if source_coord is None or target_coord is None:
+                raise ValueError("source_coord and target_coord are required when use_coord_cond=True.")
+            coord = jnp.concatenate(
+                [jnp.asarray(source_coord, dtype=jnp.float32), jnp.asarray(target_coord, dtype=jnp.float32)],
+                axis=-1,
+            )
+            cond = cond + self.coord_embedder(coord.astype(cond.dtype)) * 0.02
+
+        samples = self.generate_image(x, cond, deterministic=deterministic)
+
+        noise_dict = {"x": x, "x_noise": x_noise}
         noise_dict["noise_labels"] = noise_labels
 
-
         return {
-            "samples": samples,  # Already in BHWC format
-            "noise": noise_dict, 
+            "samples": samples,
+            "noise": noise_dict,
         }
 
 
