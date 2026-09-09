@@ -924,6 +924,9 @@ def train_gen(
     conditional=False,  # use paired conditional drifting loop
     lambda_drift=1.0,  # conditional drift-loss weight
     lambda_pair=0.0,  # optional supervised pixel L1 weight when target_true is present
+    lambda_condition=0.0,  # source-vs-negative feature InfoNCE weight
+    condition_temperature=0.1,  # temperature for conditional InfoNCE logits
+    lambda_tv=0.0,  # generated-image total-variation weight
     workdir="runs",  # run root containing checkpoints/logs
 ):
     """
@@ -964,6 +967,9 @@ def train_gen(
             log_update_diagnostics=log_update_diagnostics,
             lambda_drift=lambda_drift,
             lambda_pair=lambda_pair,
+            lambda_condition=lambda_condition,
+            condition_temperature=condition_temperature,
+            lambda_tv=lambda_tv,
             sanity_eval_at_step1=sanity_eval_at_step1,
             workdir=workdir,
         )
