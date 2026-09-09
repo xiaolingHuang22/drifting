@@ -169,3 +169,65 @@ generated features are more similar to same-class positives than to other-class
 negatives. The offline loss plot prefers `semantic_loss` and
 `val/semantic_loss`, while retaining the optimized loss as a fallback for older
 runs.
+
+## Dog/car v2 anti-collapse run
+
+The v2 configuration addresses the repeated-texture failure mode rather than
+assuming that more steps alone will fix it:
+
+- `num_classes: 2` uses the actual alphabetical mapping `cars=0`, `dogs=1`.
+- One RGB condition is concatenated with three noise channels. Using one source
+  also permits a differentiable feature-space condition objective.
+- A sigmoid bounds generated pixels to the same `[0, 1]` range as real images.
+- The total objective adds source-vs-negative InfoNCE and a small total-variation
+  penalty to the drift objective. Four generated samples per source expose
+  noise collapse through `gen_pair_distance` (near zero means noise is ignored).
+- Checkpoints are written every 5,000 steps and every 10,000-step checkpoint is
+  retained for comparison. The 80k run is an experiment: inspect 5k/10k/20k
+  before deciding whether continuing is worthwhile.
+
+Train on GPU 0:
+
+```bash
+mkdir -p logs
+CUDA_VISIBLE_DEVICES=0 python main.py --gen \
+  --config configs/gen/dog_car_conditional_v2_80k.yaml \
+  --workdir runs/dog_car_conditional_v2_80k \
+  > logs/dog_car_conditional_v2_80k.log 2>&1
+```
+
+A saved checkpoint can be read concurrently on GPU 1 without stopping training.
+Use a distinct output directory and pass the training config because raw Flax
+checkpoints do not contain model metadata:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python sample_only.py \
+  --init-from runs/dog_car_conditional_v2_80k/checkpoints \
+  --config configs/gen/dog_car_conditional_v2_80k.yaml \
+  --checkpoint-step 20000 \
+  --outdir runs/dog_car_conditional_v2_80k/samples/dogs_step_20000 \
+  --num-samples 32 --batch-size 8 --seed 123 --class-id 1 \
+  --condition-dir ~/DogCar_split/test/dogs --num-conditions 1 \
+  --condition-seed 123 --hsdp-dim 1
+```
+
+For cars, change the output directory, use `--class-id 0`, and point
+`--condition-dir` to `~/DogCar_split/test/cars`:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python sample_only.py \
+  --init-from runs/dog_car_conditional_v2_80k/checkpoints \
+  --config configs/gen/dog_car_conditional_v2_80k.yaml \
+  --checkpoint-step 20000 \
+  --outdir runs/dog_car_conditional_v2_80k/samples/cars_step_20000 \
+  --num-samples 32 --batch-size 8 --seed 123 --class-id 0 \
+  --condition-dir ~/DogCar_split/test/cars --num-conditions 1 \
+  --condition-seed 123 --hsdp-dim 1
+```
+
+Test exactly the same condition and noise seeds at each checkpoint so changes
+reflect training rather than a new input. Do not read a checkpoint while it is
+being written; test an earlier, fully completed step visible in the checkpoint
+directory. Recommended decision gates are 5k, 10k, 20k, 40k, 60k, and 80k. Stop
+if both semantic validation loss and visual quality fail to improve across
+several gates; 80k steps cannot repair an objective or conditioning failure.

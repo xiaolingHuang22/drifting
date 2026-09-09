@@ -103,6 +103,7 @@ def build_model_dict(config, model_class, *, workdir: str = "runs"):
             config.dataset.get("augmented_copies_per_image", 0)
         )
         condition_channels = int(config.dataset.get("condition_channels", 3))
+        use_class_labels = bool(config.dataset.get("use_class_labels", False))
         normalization_min, normalization_max = compute_dataset_min_max(data_path)
         print(
             "Conditional dataset-wide min-max normalization: "
@@ -141,6 +142,7 @@ def build_model_dict(config, model_class, *, workdir: str = "runs"):
             k_neg=k_neg,
             condition_sets_per_target=condition_sets_per_target,
             augmented_copies_per_image=augmented_copies_per_image,
+            use_class_labels=use_class_labels,
             seed=split_seed,
             normalization_min=normalization_min,
             normalization_max=normalization_max,
@@ -158,6 +160,7 @@ def build_model_dict(config, model_class, *, workdir: str = "runs"):
             k_neg=k_neg,
             condition_sets_per_target=condition_sets_per_target,
             augmented_copies_per_image=0,
+            use_class_labels=use_class_labels,
             seed=split_seed,
             normalization_min=normalization_min,
             normalization_max=normalization_max,
@@ -169,6 +172,19 @@ def build_model_dict(config, model_class, *, workdir: str = "runs"):
                 f"train={train_loader.dataset.class_names}, "
                 f"val={eval_loader.dataset.class_names}."
             )
+        configured_classes = int(config.dataset.num_classes)
+        discovered_classes = len(train_loader.dataset.class_names)
+        expected_classes = discovered_classes if use_class_labels else 1
+        if configured_classes != expected_classes:
+            raise ValueError(
+                "dataset.num_classes is inconsistent with use_class_labels: "
+                f"configured={configured_classes}, expected={expected_classes}, "
+                f"discovered folders={train_loader.dataset.class_names}."
+            )
+        print(
+            "Conditional class mapping: "
+            f"{train_loader.dataset.class_to_idx}"
+        )
         dataset_name = f"conditional_imagefolder{resolution}"
     elif dataset_mode == "paired_spectrogram":
         if use_latent or use_cache:

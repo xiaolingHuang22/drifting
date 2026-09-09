@@ -179,6 +179,7 @@ class ConditionalImageFolderDataset(torch.utils.data.Dataset):
         k_neg: int = 4,
         condition_sets_per_target: int = 1,
         augmented_copies_per_image: int = 0,
+        use_class_labels: bool = False,
         deterministic: bool = False,
         seed: int = 42,
     ) -> None:
@@ -190,6 +191,7 @@ class ConditionalImageFolderDataset(torch.utils.data.Dataset):
         self.k_neg = int(k_neg)
         self.condition_sets_per_target = int(condition_sets_per_target)
         self.augmented_copies_per_image = int(augmented_copies_per_image)
+        self.use_class_labels = bool(use_class_labels)
         self.deterministic = bool(deterministic)
         self.seed = int(seed)
 
@@ -341,9 +343,11 @@ class ConditionalImageFolderDataset(torch.utils.data.Dataset):
             # have no anatomical coordinates, and use_coord_cond should be false.
             "source_coord": torch.zeros(3, dtype=torch.float32),
             "target_coord": torch.zeros(3, dtype=torch.float32),
-            # Keep the generator class label constant so breed information must
-            # come from the image condition rather than a class embedding.
-            "label": torch.tensor(0, dtype=torch.int64),
+            # Class labels are optional: condition-only experiments retain label
+            # zero, while dog/car experiments can use their true class index.
+            "label": torch.tensor(
+                class_idx if self.use_class_labels else 0, dtype=torch.int64
+            ),
             "breed_index": torch.tensor(class_idx, dtype=torch.int64),
             "condition_set_index": torch.tensor(condition_set_index, dtype=torch.int64),
             "augmentation_index": torch.tensor(augmentation_index, dtype=torch.int64),
@@ -364,6 +368,7 @@ def create_conditional_imagefolder_split(
     k_neg: int = 4,
     condition_sets_per_target: int = 1,
     augmented_copies_per_image: int = 0,
+    use_class_labels: bool = False,
     use_aug: bool = False,
     use_hflip: bool = False,
     normalization_min: float | None = None,
@@ -405,6 +410,7 @@ def create_conditional_imagefolder_split(
         augmented_copies_per_image=(
             augmented_copies_per_image if split == "train" and use_aug else 0
         ),
+        use_class_labels=use_class_labels,
         deterministic=(split != "train"),
         seed=seed,
     )

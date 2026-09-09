@@ -492,6 +492,7 @@ class DitGen(nn.Module):
     noise_in_channels: int = 0
     source_in_channels: int = 0
     pixel_range: str = "minus_one_one"
+    output_activation: str = "identity"
     use_coord_cond: bool = False
     coord_dim: int = 3
     n_cls_tokens: int = 0
@@ -533,6 +534,11 @@ class DitGen(nn.Module):
         return ['noise']
 
     def setup(self):
+        if self.output_activation not in {"identity", "sigmoid", "tanh"}:
+            raise ValueError(
+                "output_activation must be one of: identity, sigmoid, tanh; "
+                f"got {self.output_activation!r}."
+            )
         dtype = jnp.bfloat16 if self.use_bf16 else jnp.float32
         param_dtype = jnp.float32
         
@@ -600,7 +606,12 @@ class DitGen(nn.Module):
         )
 
     def generate_image(self, x, cond, deterministic=True):
-        return self.model(x, cond, deterministic=deterministic)
+        samples = self.model(x, cond, deterministic=deterministic)
+        if self.output_activation == "sigmoid":
+            return jax.nn.sigmoid(samples)
+        if self.output_activation == "tanh":
+            return jnp.tanh(samples)
+        return samples
 
     def c_cfg_noise_to_cond(self, c, cfg_scale, noise_labels):
         B = c.shape[0]

@@ -320,6 +320,9 @@ def train_step_conditional(
     max_grad_norm=2.0,
     lambda_drift=1.0,
     lambda_pair=0.0,
+    lambda_condition=0.0,
+    condition_temperature=0.1,
+    lambda_tv=0.0,
     log_gen_diagnostics: bool = False,
     log_update_diagnostics: bool = False,
 ):
@@ -373,6 +376,20 @@ def train_step_conditional(
         lambda u: rearrange(u[pos_count:], "(b k) f d -> b k f d", b=bsz, k=n_neg),
         fixed_features,
     )
+    source_features = None
+    if lambda_condition > 0.0:
+        if condition_temperature <= 0.0:
+            raise ValueError(
+                "condition_temperature must be positive when lambda_condition > 0."
+            )
+        if source.shape[-1] != 3:
+            raise ValueError(
+                "lambda_condition > 0 requires exactly one RGB condition "
+                f"(source.shape[-1] == 3), got {source.shape[-1]} channels."
+            )
+        source_features = jax.lax.stop_gradient(
+            feature_apply(feature_params, source, **activation_kwargs)
+        )
 
     def loss_fn(params):
         repeated_labels = enforce_ddp(repeat(labels, "b -> (b g)", g=gen_per_label))
@@ -438,6 +455,8 @@ def train_step_conditional(
         drift_loss_total = 0
         semantic_loss_total = 0
         semantic_loss_count = 0
+        condition_loss_total = jnp.array(0.0, dtype=jnp.float32)
+        condition_loss_count = 0
         total_info = dict()
         for key, value in loss_per_feature.items():
             drift_loss_total = drift_loss_total + value[0].mean()
@@ -446,6 +465,30 @@ def train_step_conditional(
                 if info_key == "semantic_loss":
                     semantic_loss_total = semantic_loss_total + info_value
                     semantic_loss_count += 1
+        if lambda_condition > 0.0:
+            def condition_feature_loss(source_feature, negative_feature, gen_feature):
+                eps = 1e-6
+                source_unit = source_feature / jnp.clip(
+                    jnp.linalg.norm(source_feature, axis=-1, keepdims=True), a_min=eps
+                )
+                negative_unit = negative_feature / jnp.clip(
+                    jnp.linalg.norm(negative_feature, axis=-1, keepdims=True), a_min=eps
+                )
+                gen_unit = gen_feature / jnp.clip(
+                    jnp.linalg.norm(gen_feature, axis=-1, keepdims=True), a_min=eps
+                )
+                positive_logits = jnp.einsum("bgfd,bfd->bgf", gen_unit, source_unit)[..., None]
+                negative_logits = jnp.einsum("bgfd,bnfd->bgfn", gen_unit, negative_unit)
+                logits = jnp.concatenate([positive_logits, negative_logits], axis=-1)
+                return -jax.nn.log_softmax(logits / condition_temperature, axis=-1)[..., 0].mean()
+
+            condition_losses = jax.tree.map(
+                condition_feature_loss, source_features, neg_features, gen_features
+            )
+            for value in jax.tree_util.tree_leaves(condition_losses):
+                condition_loss_total = condition_loss_total + value
+                condition_loss_count += 1
+            condition_loss_total = condition_loss_total / max(condition_loss_count, 1)
         drift_loss_total = drift_loss_total.mean()
         pair_loss = jnp.array(0.0, dtype=jnp.float32)
         if lambda_pair > 0.0 and "target_true" in batch:
@@ -457,11 +500,34 @@ def train_step_conditional(
             else:
                 pair_loss = pair_loss_values.mean()
 
-        total_loss = lambda_drift * drift_loss_total + lambda_pair * pair_loss
+        tv_loss = (
+            jnp.abs(gen_samples[:, 1:, :, :] - gen_samples[:, :-1, :, :]).mean()
+            + jnp.abs(gen_samples[:, :, 1:, :] - gen_samples[:, :, :-1, :]).mean()
+        )
+        total_loss = (
+            lambda_drift * drift_loss_total
+            + lambda_pair * pair_loss
+            + lambda_condition * condition_loss_total
+            + lambda_tv * tv_loss
+        )
         total_info = jax.tree.map(lambda x: x.mean(), total_info)
         total_info["loss_drift"] = drift_loss_total
         total_info["loss_pair"] = pair_loss
+        total_info["loss_condition"] = condition_loss_total
+        total_info["loss_tv"] = tv_loss
         total_info["semantic_loss"] = semantic_loss_total / max(semantic_loss_count, 1)
+        if gen_per_label > 1:
+            grouped_samples = rearrange(
+                gen_samples, "(b g) h w c -> b g h w c", b=bsz, g=gen_per_label
+            )
+            pairwise_distance = jnp.abs(
+                grouped_samples[:, :, None] - grouped_samples[:, None, :]
+            ).mean(axis=(3, 4, 5))
+            off_diagonal = 1.0 - jnp.eye(gen_per_label, dtype=pairwise_distance.dtype)
+            total_info["gen_pair_distance"] = jax.lax.stop_gradient(
+                (pairwise_distance * off_diagonal[None]).sum()
+                / (bsz * gen_per_label * (gen_per_label - 1))
+            )
         if log_gen_diagnostics:
             total_info["gen_is_finite"] = gen_finite.all().astype(jnp.float32)
             total_info["gen_nonfinite"] = gen_nonfinite.astype(jnp.float32)
@@ -521,6 +587,9 @@ def val_loss_step_conditional(
     loss_kwargs=dict(R_list=[0.2]),
     lambda_drift=1.0,
     lambda_pair=0.0,
+    lambda_condition=0.0,
+    condition_temperature=0.1,
+    lambda_tv=0.0,
     log_gen_diagnostics: bool = False,
 ):
     """Compute conditional held-out loss without optimizer updates."""
@@ -537,6 +606,9 @@ def val_loss_step_conditional(
         max_grad_norm=1.0,
         lambda_drift=lambda_drift,
         lambda_pair=lambda_pair,
+        lambda_condition=lambda_condition,
+        condition_temperature=condition_temperature,
+        lambda_tv=lambda_tv,
         log_gen_diagnostics=log_gen_diagnostics,
         log_update_diagnostics=False,
     )
@@ -607,6 +679,9 @@ def train_gen_conditional(
     log_update_diagnostics=False,
     lambda_drift=1.0,
     lambda_pair=0.0,
+    lambda_condition=0.0,
+    condition_temperature=0.1,
+    lambda_tv=0.0,
     sanity_eval_at_step1=False,
     workdir="runs",
     **unused_train_kwargs,
@@ -670,6 +745,9 @@ def train_gen_conditional(
             max_grad_norm=max_grad_norm,
             lambda_drift=lambda_drift,
             lambda_pair=lambda_pair,
+            lambda_condition=lambda_condition,
+            condition_temperature=condition_temperature,
+            lambda_tv=lambda_tv,
             log_gen_diagnostics=log_gen_diagnostics,
             log_update_diagnostics=log_update_diagnostics,
         ),
@@ -685,6 +763,9 @@ def train_gen_conditional(
             gen_per_label=gen_per_label,
             lambda_drift=lambda_drift,
             lambda_pair=lambda_pair,
+            lambda_condition=lambda_condition,
+            condition_temperature=condition_temperature,
+            lambda_tv=lambda_tv,
             log_gen_diagnostics=log_gen_diagnostics,
         )
     )
