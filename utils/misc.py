@@ -54,7 +54,17 @@ def run_init():
     global _did_run_init
     if _did_run_init:
         return
-    jax.distributed.initialize()
+    try:
+        jax.distributed.initialize()
+    except ValueError as err:
+        msg = str(err)
+        # For single-process local/GPU workflows, distributed rendezvous env vars
+        # may be unset. In that case, skip distributed init and rely on default
+        # process_count=1 semantics.
+        if ("coordinator_address should be defined" in msg) or ("Number of processes must be defined" in msg):
+            _did_run_init = True
+            return
+        raise
     _did_run_init = True
 
 

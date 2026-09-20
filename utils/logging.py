@@ -5,7 +5,7 @@ import os
 import hashlib
 import math
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 import jax
 import numpy as np
@@ -31,6 +31,8 @@ class WandbLogger:
         self.step = 0
         self.use_wandb = True
         self.log_every_k = 1
+        self.console_log = True
+        self.console_preview_keys = None
         self._buffer: Dict[str, float] = {}
         self._count: Dict[str, int] = {}
         self.offline_dir = Path("log")
@@ -46,11 +48,15 @@ class WandbLogger:
         offline_dir: str = "log",
         workdir: Optional[str] = None,
         log_every_k: int = 1,
+        console_log: bool = True,
+        console_preview_keys: Optional[Sequence[str]] = None,
         allow_resume: bool = True,
         **kwargs,
     ) -> None:
         self.use_wandb = bool(use_wandb)
         self.log_every_k = int(log_every_k)
+        self.console_log = bool(console_log)
+        self.console_preview_keys = list(console_preview_keys) if console_preview_keys is not None else None
         workdir_path = Path(workdir).resolve() if workdir else None
         resolved_offline_dir = workdir_path / "log" if (workdir_path is not None and not self.use_wandb) else Path(offline_dir)
         self.offline_dir = resolved_offline_dir
@@ -81,6 +87,21 @@ class WandbLogger:
         if not self._buffer:
             return
         reduced = {k: (self._buffer[k] / max(1, self._count.get(k, 1))) for k in self._buffer.keys()}
+        if self.console_log and is_rank_zero():
+            default_preview_keys = (
+                "loss",
+                "val/loss",
+                "lr",
+                "g_norm",
+                "best_fid",
+                "best_cfg",
+            )
+            configured_keys = self.console_preview_keys or default_preview_keys
+            preview_keys = [k for k in configured_keys if k in reduced]
+            if preview_keys:
+                preview = " ".join(f"{k}={reduced[k]:.6g}" for k in preview_keys)
+                # Use plain stdout to ensure visibility regardless of absl log level.
+                print(f"[train] step={self.step} {preview}", flush=True)
         if self._wandb is not None:
             self._wandb.log(reduced, step=self.step)
         else:

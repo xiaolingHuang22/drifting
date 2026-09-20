@@ -435,8 +435,14 @@ def build_activation_function(
     use_convnext=False,
     convnext_bf16=False,
     use_mae=True,
+    include_raw_global=True,
     postprocess_fn=lambda x: x,
 ):
+    if not include_raw_global and not use_mae and not use_convnext:
+        raise ValueError(
+            "At least one drift feature must be enabled: set include_raw_global=true, "
+            "use_mae=true, or use_convnext=true."
+        )
     variables = dict()
     if use_mae:
         feature_model, feature_params = build_feature_model_and_params(
@@ -453,7 +459,10 @@ def build_activation_function(
 
     def activation_fn(params, x, convnext_kwargs=dict(), has_scale=False, **kwargs):
         usual_feats = dict()
-        usual_feats["global"] = x.reshape(x.shape[0], 1, -1)
+        if include_raw_global:
+            # Raw flattened pixels are useful for spatially aligned data, but can
+            # encourage patch/color averaging for unaligned natural images.
+            usual_feats["global"] = x.reshape(x.shape[0], 1, -1)
         if has_scale:
             usual_feats["norm_x"] = jnp.sqrt((x ** 2).mean(axis=(1, 2)) + 1e-6)[:, None, :]
 

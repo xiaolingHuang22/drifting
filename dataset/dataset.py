@@ -26,9 +26,19 @@ from torchvision import transforms
 from torchvision.datasets import ImageFolder
 
 from dataset.latent import LatentDataset
-from dataset.vae import vae_enc_decode
 from utils.env import IMAGENET_PATH, IMAGENET_CACHE_PATH
 from utils.logging import log_for_0
+
+
+class CenterCropArrTransform:
+    """Pickle-safe callable wrapper for center-crop preprocessing."""
+
+    def __init__(self, image_size: int):
+        self.image_size = int(image_size)
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        return center_crop_arr(img, self.image_size)
+
 
 def center_crop_arr(pil_image: Image.Image, image_size: int) -> Image.Image:
     """Center-crop image with ADM preprocessing style."""
@@ -44,7 +54,7 @@ def center_crop_arr(pil_image: Image.Image, image_size: int) -> Image.Image:
     return Image.fromarray(arr[crop_y : crop_y + image_size, crop_x : crop_x + image_size])
 
 
-def _build_transforms(resolution: int, use_aug: bool, split: str):
+def _build_transforms(resolution: int, use_aug: bool, split: str, use_hflip: bool = True):
     """Build torchvision transforms for ImageNet.
 
     Args:
@@ -57,30 +67,35 @@ def _build_transforms(resolution: int, use_aug: bool, split: str):
         - otherwise uses center-crop style preprocessing.
     """
     if use_aug and split == "train":
-        return transforms.Compose(
+        ops = [transforms.RandomResizedCrop(resolution, scale=(0.2, 1.0), interpolation=3)]
+        if use_hflip:
+            ops.append(transforms.RandomHorizontalFlip())
+        ops.extend(
             [
-                transforms.RandomResizedCrop(resolution, scale=(0.2, 1.0), interpolation=3),
-                transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
             ]
         )
-    return transforms.Compose(
+        return transforms.Compose(ops)
+
+    ops = [transforms.Lambda(CenterCropArrTransform(resolution))]
+    if use_hflip:
+        ops.append(transforms.RandomHorizontalFlip())
+    ops.extend(
         [
-            transforms.Lambda(lambda img: center_crop_arr(img, resolution)),
-            transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
         ]
     )
+    return transforms.Compose(ops)
 
 
-def _build_imagenet_dataset(*, resolution: int, use_aug: bool, use_cache: bool, split: str):
+def _build_imagenet_dataset(*, resolution: int, use_aug: bool, use_hflip: bool, use_cache: bool, split: str):
     """Create dataset object for one ImageNet split."""
     if use_cache:
-        return LatentDataset(root=os.path.join(IMAGENET_CACHE_PATH, split))
+        return LatentDataset(root=os.path.join(IMAGENET_CACHE_PATH, split), use_hflip=use_hflip)
 
-    transform = _build_transforms(resolution, use_aug=use_aug, split=split)
+    transform = _build_transforms(resolution, use_aug=use_aug, split=split, use_hflip=use_hflip)
     return ImageFolder(root=os.path.join(IMAGENET_PATH, split), transform=transform)
 
 
@@ -98,6 +113,7 @@ def create_imagenet_split(
     batch_size: int,
     split: str,
     use_aug: bool = False,
+    use_hflip: bool = True,
     use_latent: bool = False,
     use_cache: bool = False,
     num_workers: int = 4,
@@ -110,6 +126,7 @@ def create_imagenet_split(
     Args:
         resolution: image resolution.
         use_aug: whether enable random resized crop augmentation for train split.
+        use_hflip: whether enable random horizontal flip.
         use_latent: encode RGB image to latent online.
         use_cache: read precomputed latent cache from disk.
         batch_size: per-process batch size.
@@ -133,6 +150,7 @@ def create_imagenet_split(
     ds = _build_imagenet_dataset(
         resolution=resolution,
         use_aug=use_aug,
+        use_hflip=use_hflip,
         use_cache=use_cache,
         split=split,
     )
@@ -140,19 +158,24 @@ def create_imagenet_split(
 
     rank = jax.process_index()
     sampler = DistributedSampler(ds, num_replicas=jax.process_count(), rank=rank, shuffle=True)
-    loader = DataLoader(
-        ds,
-        batch_size=batch_size,
-        drop_last=(split == "train"),
-        worker_init_fn=partial(worker_init_fn, rank=rank),
-        sampler=sampler,
-        num_workers=num_workers,
-        prefetch_factor=(prefetch_factor if num_workers > 0 else None),
-        pin_memory=pin_memory,
-        persistent_workers=True if num_workers > 0 else False,
-    )
+    loader_kwargs = {
+        "dataset": ds,
+        "batch_size": batch_size,
+        "drop_last": (split == "train"),
+        "worker_init_fn": partial(worker_init_fn, rank=rank),
+        "sampler": sampler,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "persistent_workers": True if num_workers > 0 else False,
+    }
+    if num_workers > 0:
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+        # JAX runtime is multi-threaded; prefer spawn to avoid fork-related warnings/deadlocks.
+        loader_kwargs["multiprocessing_context"] = "spawn"
+    loader = DataLoader(**loader_kwargs)
 
     if use_latent or use_cache:
+        from dataset.vae import vae_enc_decode
         encode_fn, decode_fn = vae_enc_decode()
         if use_cache:
             def preprocess_fn(batch, rng=jax.random.PRNGKey(0)):
@@ -208,8 +231,21 @@ def get_postprocess_fn(*, use_aug: bool = False, use_latent: bool = False, use_c
     raise ValueError("Unsupported dataset flags.")
 
 
+def _to_numpy_batch(batch):
+    """Convert torch tensors in a DataLoader batch to NumPy recursively."""
+    if isinstance(batch, torch.Tensor):
+        return batch.numpy()
+    if isinstance(batch, dict):
+        return {key: _to_numpy_batch(value) for key, value in batch.items()}
+    if isinstance(batch, tuple):
+        return tuple(_to_numpy_batch(value) for value in batch)
+    if isinstance(batch, list):
+        return [_to_numpy_batch(value) for value in batch]
+    return batch
+
+
 def infinite_sampler(it, start_step: int = 0):
-    """Yield `(image, label)` batches forever, resuming at `start_step`."""
+    """Yield DataLoader batches forever, resuming at `start_step`."""
     step_per_epoch = len(it)
     epoch_idx = start_step // step_per_epoch
     it.sampler.set_epoch(epoch_idx)
@@ -218,8 +254,7 @@ def infinite_sampler(it, start_step: int = 0):
         for i, batch in enumerate(it):
             if skip_batches > 0 and i < skip_batches:
                 continue
-            image, label = batch
-            yield (image.numpy(), label.numpy())
+            yield _to_numpy_batch(batch)
         skip_batches = 0
         epoch_idx += 1
         it.sampler.set_epoch(epoch_idx)
@@ -229,5 +264,4 @@ def epoch0_sampler(it):
     """Yield one deterministic epoch (`sampler.set_epoch(0)`)."""
     it.sampler.set_epoch(0)
     for batch in it:
-        image, label = batch
-        yield (image.numpy(), label.numpy())
+        yield _to_numpy_batch(batch)
