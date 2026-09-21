@@ -10,8 +10,6 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
-os.environ.setdefault("JAX_PLATFORMS", "tpu,cpu")
-
 import jax
 import jax.numpy as jnp
 import jax.experimental.multihost_utils as mu
@@ -29,33 +27,35 @@ from utils.env import IMAGENET_CACHE_PATH, IMAGENET_PATH
 class _CacheWriteItem:
     output_path: str
     moments: np.ndarray
-    moments_flip: np.ndarray
+    moments_flip: np.ndarray | None
 
 
 def _write_cache_file(item: _CacheWriteItem) -> None:
     output_path = Path(item.output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = output_path.with_suffix(f"{output_path.suffix}.tmp.{os.getpid()}")
-    torch.save(
-        {
-            "moments": item.moments,
-            "moments_flip": item.moments_flip,
-        },
-        tmp_path,
-    )
+    payload = {"moments": item.moments}
+    if item.moments_flip is not None:
+        payload["moments_flip"] = item.moments_flip
+    torch.save(payload, tmp_path)
     os.replace(tmp_path, output_path)
 
 
 class LatentDataset(datasets.DatasetFolder):
     """ImageFolder-style dataset for cached latent `.pt` files."""
 
-    def __init__(self, root: str):
+    def __init__(self, root: str, use_hflip: bool = True):
         super().__init__(root=root, loader=str, extensions=(".pt",))
+        self.use_hflip = use_hflip
 
     def __getitem__(self, index: int):
         path, target = self.samples[index]
         data = torch.load(path, map_location="cpu", weights_only=False)
-        moments = data["moments"] if torch.rand(1) < 0.5 else data["moments_flip"]
+        has_flipped = "moments_flip" in data
+        if self.use_hflip and has_flipped and torch.rand(1) < 0.5:
+            moments = data["moments_flip"]
+        else:
+            moments = data["moments"]
         return np.asarray(moments), target
 
 
@@ -103,17 +103,30 @@ def create_cached_dataset(
     prefetch_factor: int = 2,
     pin_memory: bool = False,
     save_workers: int = 0,
+    include_flips: bool = True,
 ) -> None:
     """Encode ImageNet train/val images and write latent cache files."""
     from dataset.vae import vae_enc_decode
     from utils.hsdp_util import set_global_mesh
 
-    local_tpu_devices = jax.local_devices(backend="tpu")
-    n_local_devices = max(1, len(local_tpu_devices))
+    local_devices = []
+    local_backend = ""
+    for backend in ("tpu", "gpu", "cpu"):
+        try:
+            devs = jax.local_devices(backend=backend)
+        except Exception:
+            devs = []
+        if devs:
+            local_devices = devs
+            local_backend = backend
+            break
+    if not local_devices:
+        raise RuntimeError("No local JAX devices found for TPU/GPU/CPU backends.")
+    n_local_devices = len(local_devices)
 
     if local_batch_size % n_local_devices != 0:
         raise ValueError(
-            f"`local_batch_size` must be divisible by local TPU device count={n_local_devices}, got {local_batch_size}."
+            f"`local_batch_size` must be divisible by local {local_backend.upper()} device count={n_local_devices}, got {local_batch_size}."
         )
 
     set_global_mesh(min(8, n_local_devices * jax.process_count()))
@@ -126,7 +139,7 @@ def create_cached_dataset(
     # can participate in the cache build.
     encode_fn, _ = vae_enc_decode(replicate_params=True)
 
-    local_mesh = Mesh(np.array(local_tpu_devices), axis_names=("data",))
+    local_mesh = Mesh(np.array(local_devices), axis_names=("data",))
     sample_sharding = NamedSharding(local_mesh, P("data", None, None, None))
     rng_sharding = NamedSharding(local_mesh, P("data", None))
     output_sharding = NamedSharding(local_mesh, P("data", None, None, None))
@@ -135,10 +148,14 @@ def create_cached_dataset(
     @partial(
         jax.jit,
         in_shardings=(sample_sharding, rng_sharding),
-        out_shardings={
-            "moments": output_sharding,
-            "moments_flip": output_sharding,
-        },
+        out_shardings=(
+            {
+                "moments": output_sharding,
+                "moments_flip": output_sharding,
+            }
+            if include_flips
+            else {"moments": output_sharding}
+        ),
     )
     def encode(samples, rngs):
         # Data is sharded across local devices, while the VAE params stay
@@ -147,10 +164,10 @@ def create_cached_dataset(
         samples = samples.reshape((n_local_devices, per_device_batch, *samples.shape[1:]))
 
         def _encode_shard(sample_shard, rng_shard):
-            return {
-                "moments": encode_fn(sample_shard, rng_shard),
-                "moments_flip": encode_fn(jnp.flip(sample_shard, axis=3), rng_shard),
-            }
+            result = {"moments": encode_fn(sample_shard, rng_shard)}
+            if include_flips:
+                result["moments_flip"] = encode_fn(jnp.flip(sample_shard, axis=3), rng_shard)
+            return result
 
         encoded = jax.vmap(_encode_shard, in_axes=(0, 0), out_axes=0)(samples, rngs)
         return jax.tree_util.tree_map(
@@ -212,10 +229,9 @@ def create_cached_dataset(
                 jax.device_put(step_rng, rng_sharding),
             )
             encoded_local = jax.tree_util.tree_map(np.asarray, encoded_local)
-            encoded = {
-                "moments": mu.process_allgather(encoded_local["moments"], tiled=True),
-                "moments_flip": mu.process_allgather(encoded_local["moments_flip"], tiled=True),
-            }
+            encoded = {"moments": mu.process_allgather(encoded_local["moments"], tiled=True)}
+            if include_flips:
+                encoded["moments_flip"] = mu.process_allgather(encoded_local["moments_flip"], tiled=True)
 
             write_items = []
             for i, rel_path in enumerate(rel_paths[:n_valid_global]):
@@ -226,7 +242,7 @@ def create_cached_dataset(
                     _CacheWriteItem(
                         output_path=output_path,
                         moments=np.asarray(encoded["moments"][i]),
-                        moments_flip=np.asarray(encoded["moments_flip"][i]),
+                        moments_flip=(np.asarray(encoded["moments_flip"][i]) if include_flips else None),
                     )
                 )
             if save_pool is None:
@@ -259,6 +275,7 @@ def build_cache_from_args(args: argparse.Namespace) -> None:
         prefetch_factor=int(args.prefetch_factor),
         pin_memory=bool(args.pin_memory),
         save_workers=int(args.save_workers),
+        include_flips=not bool(args.no_flip),
     )
 
 
@@ -285,6 +302,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=0,
         help="Optional process count for asynchronous latent file writes on each host.",
+    )
+    parser.add_argument(
+        "--no-flip",
+        action="store_true",
+        help="Do not store flipped latent moments; only cache original orientation.",
     )
     return parser.parse_args(argv)
 
