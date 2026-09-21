@@ -94,6 +94,14 @@ validation steps, increase one dimension at a time while watching `nvidia-smi`.
 Two visible GPUs do not combine their memory when the command is restricted to
 one device with `CUDA_VISIBLE_DEVICES=0`.
 
+Pair-list inference reads the same cached condition latents used during
+training. The generator parameters are passed to JIT as an explicit argument,
+and VAE decoding runs as a separate dispatch. This avoids stale captured CUDA
+device handles (`PjRtDevice not found: cuda:0`) and avoids compiling the
+generator and VAE decoder into one large executable. Always launch training and
+inference as separate processes; use a completed checkpoint and assign each
+process a different `CUDA_VISIBLE_DEVICES` value when they run concurrently.
+
 ## 4. Inject the condition set
 
 Each condition latent is processed by the same two-layer convolutional
