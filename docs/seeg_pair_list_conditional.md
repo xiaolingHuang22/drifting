@@ -140,6 +140,31 @@ lambda_drift * compatibility-masked drift
 The target is used only during training/validation loss calculation.  It is
 not an inference input.
 
+The per-feature drifting objective is normalized by construction: with one
+radius, each feature leaf reports a value close to one even while its gradient
+direction changes. The trainer therefore averages rather than sums MAE feature
+leaves. A historical `loss_drift=61` meant that 61 normalized feature leaves
+were summed; it was not evidence that the model was 61 times farther from the
+target. Monitor `loss_pair`, `val/loss_pair`, decoded samples, and the generated
+versus target latent magnitudes for short supervised runs.
+
+Uniform beige/grey decoded samples indicate that the generator is still
+producing near-zero VAE latents. They are plausible for an initialization or
+pipeline smoke test, but they are not a successful 2,000-step result when
+`loss_pair` and `val/loss_pair` remain flat. The debug preset now gives the
+paired-target loss primary weight and uses a larger learning rate while keeping
+the compatibility-masked drifting field active. Because this changes the
+objective scale, start it in a new work directory rather than resuming a
+checkpoint trained with the summed 61-leaf loss.
+
+`sample_pair_list.py` saves `target_original.png` and
+`target_vae_reconstruction.png` beside generated samples. The target is used
+only to create these evaluation references, never as generator input. If the
+VAE reconstruction has already lost the important spectrogram structure, fix
+the representation before interpreting generator quality. If the VAE
+reconstruction is adequate but generated samples remain uniform, the failure
+is in generator training or conditioning.
+
 ## 6. Run the debug experiment
 
 Update the three paths in

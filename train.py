@@ -490,6 +490,7 @@ def train_step_conditional(
 
         loss_per_feature = jax.tree.map(feature_loss, pos_features, neg_features, gen_features)
         drift_loss_total = 0
+        drift_feature_count = 0
         semantic_loss_total = 0
         semantic_loss_count = 0
         condition_loss_total = jnp.array(0.0, dtype=jnp.float32)
@@ -497,6 +498,7 @@ def train_step_conditional(
         total_info = dict()
         for key, value in loss_per_feature.items():
             drift_loss_total = drift_loss_total + value[0].mean()
+            drift_feature_count += 1
             for info_key, info_value in value[1].items():
                 total_info[f"{info_key}/{key}"] = info_value
                 if info_key == "semantic_loss":
@@ -526,7 +528,12 @@ def train_step_conditional(
                 condition_loss_total = condition_loss_total + value
                 condition_loss_count += 1
             condition_loss_total = condition_loss_total / max(condition_loss_count, 1)
-        drift_loss_total = drift_loss_total.mean()
+        # Each normalized drifting feature contributes a value close to one at
+        # the point where its stopped-gradient goal is constructed. Summing the
+        # leaves made the reported loss equal the number of MAE feature leaves
+        # (61 in the SEEG config), obscured progress, and made its gradient scale
+        # depend on feature-extractor internals. Average the leaves instead.
+        drift_loss_total = drift_loss_total.mean() / max(drift_feature_count, 1)
         pair_loss = jnp.array(0.0, dtype=jnp.float32)
         if lambda_pair > 0.0 and "target_true" in batch:
             target_true = repeat(batch["target_true"], "b h w c -> (b g) h w c", g=gen_per_label)
@@ -549,6 +556,9 @@ def train_step_conditional(
         )
         total_info = jax.tree.map(lambda x: x.mean(), total_info)
         total_info["loss_drift"] = drift_loss_total
+        total_info["drift_feature_count"] = jnp.asarray(
+            drift_feature_count, dtype=jnp.float32
+        )
         total_info["loss_pair"] = pair_loss
         total_info["loss_condition"] = condition_loss_total
         total_info["loss_tv"] = tv_loss
@@ -569,6 +579,11 @@ def train_step_conditional(
             total_info["gen_is_finite"] = gen_finite.all().astype(jnp.float32)
             total_info["gen_nonfinite"] = gen_nonfinite.astype(jnp.float32)
             total_info["gen_abs_max"] = gen_abs_max
+            total_info["gen_abs_mean"] = jnp.abs(gen_samples_f32).mean()
+            if "target_true" in batch:
+                total_info["target_abs_mean"] = jnp.abs(
+                    batch["target_true"].astype(jnp.float32)
+                ).mean()
         return total_loss, total_info
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)

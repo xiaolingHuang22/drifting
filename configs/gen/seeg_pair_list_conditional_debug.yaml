@@ -9,9 +9,13 @@ logging:
     - loss
     - loss_drift
     - loss_pair
+    - semantic_loss
     - g_norm
     - gen_abs_max
+    - gen_abs_mean
+    - target_abs_mean
     - val/loss
+    - val/loss_pair
 
 dataset:
   mode: pair_list_spectrogram
@@ -71,8 +75,8 @@ model:
 
 optimizer:
   lr_schedule:
-    learning_rate: 0.00001
-    warmup_steps: 200
+    learning_rate: 0.0001
+    warmup_steps: 100
     lr_schedule: "const"
     total_steps: 2000
   weight_decay: 0.01
@@ -95,9 +99,10 @@ train:
   log_gen_diagnostics: true
   log_update_diagnostics: false
   max_grad_norm: 0.5
-  lambda_drift: 1.0
-  # Stabilizes the known paired prediction task in VAE latent space.
-  lambda_pair: 0.1
+  # Keep the paper-aligned field active while making the known target the main
+  # signal in this short, supervised pipeline-validation run.
+  lambda_drift: 0.1
+  lambda_pair: 1.0
   lambda_condition: 0.0
   lambda_tv: 0.0
   forward_dict:

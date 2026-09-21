@@ -125,6 +125,29 @@ def main():
     _, decode_fn = vae_enc_decode()
     outdir = Path(args.outdir).expanduser().resolve()
     outdir.mkdir(parents=True, exist_ok=True)
+    # These files are evaluation references only; the true target is never
+    # passed to the generator. The reconstruction separates VAE information
+    # loss from generator-training failure.
+    target_image_path = Path(record["target_path"])
+    with Image.open(target_image_path) as target_image:
+        target_image.convert("RGB").save(outdir / "target_original.png")
+    if latent_root is not None:
+        target_latent_path = (
+            latent_root / target_image_path.parent.name / f"{target_image_path.stem}.npy"
+        )
+        if not target_latent_path.is_file():
+            raise FileNotFoundError(f"Missing cached target latent: {target_latent_path}")
+        target_latent = np.load(target_latent_path, allow_pickle=False)
+        target_reconstruction = decode_fn(
+            jnp.asarray(target_latent[None]).transpose(0, 3, 1, 2)
+        )
+        target_reconstruction = jnp.clip((target_reconstruction + 1) / 2, 0, 1)
+        target_reconstruction = _to_uint8_images(
+            np.asarray(target_reconstruction)
+        )[0]
+        Image.fromarray(target_reconstruction).save(
+            outdir / "target_vae_reconstruction.png"
+        )
     (outdir / "conditions.txt").write_text(
         "\n".join(item["path"] for item in selected) + "\n", encoding="utf-8"
     )
