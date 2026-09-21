@@ -495,6 +495,9 @@ class DitGen(nn.Module):
     output_activation: str = "identity"
     use_coord_cond: bool = False
     coord_dim: int = 3
+    use_condition_set: bool = False
+    condition_channels: int = 4
+    condition_metadata_dim: int = 7
     n_cls_tokens: int = 0
     patch_size: int = 2
 
@@ -524,6 +527,15 @@ class DitGen(nn.Module):
             inputs['source'] = jnp.zeros(
                 (1, self.input_size, self.input_size, self.source_in_channels),
                 dtype=jnp.float32,
+            )
+        if self.use_condition_set:
+            inputs['source'] = jnp.zeros(
+                (1, 8, self.input_size, self.input_size, self.condition_channels),
+                dtype=jnp.float32,
+            )
+            inputs['condition_mask'] = jnp.ones((1, 8), dtype=jnp.float32)
+            inputs['condition_metadata'] = jnp.zeros(
+                (1, 8, self.condition_metadata_dim), dtype=jnp.float32
             )
         if self.use_coord_cond:
             inputs['source_coord'] = jnp.zeros((1, self.coord_dim), dtype=jnp.float32)
@@ -582,6 +594,23 @@ class DitGen(nn.Module):
                     param_dtype=param_dtype,
                 ),
             ])
+        if self.use_condition_set:
+            # A shared lightweight encoder is applied to every condition.  Masked
+            # attention pooling makes the representation permutation invariant
+            # and supports variable-length pair lists.
+            self.condition_conv_1 = nn.Conv(64, (3, 3), strides=(2, 2), padding="SAME", dtype=dtype)
+            self.condition_conv_2 = nn.Conv(128, (3, 3), strides=(2, 2), padding="SAME", dtype=dtype)
+            self.condition_image_proj = TorchLinear(self.cond_dim, dtype=dtype, param_dtype=param_dtype)
+            self.condition_metadata_proj = nn.Sequential([
+                TorchLinear(self.cond_dim, dtype=dtype, param_dtype=param_dtype),
+                nn.silu,
+                TorchLinear(self.cond_dim, dtype=dtype, param_dtype=param_dtype),
+            ])
+            self.condition_score = TorchLinear(1, dtype=dtype, param_dtype=param_dtype)
+            self.condition_out = TorchLinear(
+                self.cond_dim, weight_init="zeros", bias_init="zeros",
+                dtype=dtype, param_dtype=param_dtype,
+            )
 
         self.model = LightningDiT(
             input_size=self.input_size,
@@ -646,6 +675,8 @@ class DitGen(nn.Module):
         source=None,
         source_coord=None,
         target_coord=None,
+        condition_mask=None,
+        condition_metadata=None,
     ):
         del train
         B = c.shape[0]
@@ -654,7 +685,12 @@ class DitGen(nn.Module):
         rng_x, rng_labels = random.split(rng)
         c = enforce_ddp(c)
 
-        if source is not None:
+        condition_set = source is not None and source.ndim == 5
+        if condition_set and not self.use_condition_set:
+            raise ValueError("Received a condition set but model.use_condition_set is false.")
+        if condition_set:
+            noise_channels = self.noise_in_channels or self.in_channels
+        elif source is not None:
             source = enforce_ddp(source)
             noise_channels = self.noise_in_channels or (self.in_channels - source.shape[-1])
         else:
@@ -673,7 +709,9 @@ class DitGen(nn.Module):
             x_noise = ddp_rand_func(shard="ddp", rand_type="normal")(rng_x, noise_shape)
         x_noise = x_noise * temp + jnp.zeros_like(c, dtype=x_noise.dtype)[:, None, None, None]
 
-        if source is not None:
+        if condition_set:
+            x = x_noise
+        elif source is not None:
             if source.shape[-1] != self.source_in_channels:
                 raise ValueError(
                     f"Expected source with {self.source_in_channels} channels, "
@@ -695,6 +733,25 @@ class DitGen(nn.Module):
         noise_labels = noise_labels + jnp.zeros_like(c, dtype=noise_labels.dtype)[:, None]
 
         cond = self.c_cfg_noise_to_cond(c, cfg_scale, noise_labels)
+        if condition_set:
+            if condition_mask is None or condition_metadata is None:
+                raise ValueError("condition_mask and condition_metadata are required for condition sets.")
+            b, k, h, w, channels = source.shape
+            if channels != self.condition_channels:
+                raise ValueError(
+                    f"Expected {self.condition_channels} condition channels, got {channels}."
+                )
+            encoded = source.reshape(b * k, h, w, channels)
+            encoded = nn.silu(self.condition_conv_1(encoded))
+            encoded = nn.silu(self.condition_conv_2(encoded)).mean(axis=(1, 2))
+            encoded = self.condition_image_proj(encoded).reshape(b, k, self.cond_dim)
+            metadata = self.condition_metadata_proj(condition_metadata.astype(encoded.dtype))
+            condition_tokens = encoded + metadata
+            scores = self.condition_score(condition_tokens)[..., 0]
+            scores = jnp.where(condition_mask > 0, scores, -1e9)
+            weights = jax.nn.softmax(scores, axis=1)
+            pooled = (condition_tokens * weights[..., None]).sum(axis=1)
+            cond = cond + self.condition_out(pooled) * 0.02
         if self.use_coord_cond:
             if source_coord is None or target_coord is None:
                 raise ValueError("source_coord and target_coord are required when use_coord_cond=True.")

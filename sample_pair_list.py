@@ -1,0 +1,123 @@
+"""Generate a held-out SEEG target from its variable-length pair list."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+from PIL import Image
+from torchvision import transforms
+
+from dataset.pair_list_spectrogram import build_pair_list_records
+from dataset.vae import vae_enc_decode
+from sample_only import _to_uint8_images
+from utils.env import HF_ROOT
+from utils.hsdp_util import set_global_mesh
+from utils.init_util import load_generator_model_and_params
+from utils.misc import load_config, prepare_rng, run_init
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--init-from", required=True)
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--target-id", required=True, help="For example: PID1,A10")
+    parser.add_argument("--outdir", required=True)
+    parser.add_argument("--num-samples", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--checkpoint-step", type=int, default=None)
+    parser.add_argument("--hsdp-dim", type=int, default=1)
+    args = parser.parse_args()
+
+    run_init()
+    set_global_mesh(args.hsdp_dim)
+    config = load_config(args.config)
+    model_config = dict(config.model)
+    model_config["num_classes"] = int(config.dataset.num_classes)
+    model, params, _ = load_generator_model_and_params(
+        args.init_from,
+        hf_cache_dir=HF_ROOT,
+        model_config=model_config,
+        checkpoint_step=args.checkpoint_step,
+    )
+
+    records = build_pair_list_records(config.dataset.table_path, config.dataset.image_root)
+    try:
+        record = next(item for item in records if item["target_id"] == args.target_id)
+    except StopIteration as exc:
+        raise ValueError(f"Unknown target ID {args.target_id!r}.") from exc
+    max_conditions = int(config.dataset.get("max_conditions", 8))
+    selected = record["conditions"][:max_conditions]
+    transform = transforms.Compose([
+        transforms.Resize((int(config.dataset.resolution), int(config.dataset.resolution)), antialias=True),
+        transforms.ToTensor(),
+        transforms.Normalize([.5] * 3, [.5] * 3),
+    ])
+    pixel_conditions = []
+    for item in selected:
+        with Image.open(item["path"]) as image:
+            pixel_conditions.append(np.asarray(transform(image.convert("RGB")), dtype=np.float32))
+    while len(pixel_conditions) < max_conditions:
+        pixel_conditions.append(np.zeros_like(pixel_conditions[0]))
+    pixels = jnp.asarray(np.stack(pixel_conditions))
+    encode_fn, decode_fn = vae_enc_decode()
+    encoded = encode_fn(pixels, jax.random.PRNGKey(args.seed))
+    if encoded.shape[1] in (1, 3, 4):
+        encoded = encoded.transpose(0, 2, 3, 1)
+    source_single = encoded[None]
+    mask_single = jnp.asarray(
+        [[1.0] * len(selected) + [0.0] * (max_conditions - len(selected))],
+        dtype=jnp.float32,
+    )
+    target_coord = jnp.asarray([record["target_coord"]], dtype=jnp.float32)
+    coordinate_scale = float(config.dataset.get("coordinate_scale", 100.0))
+    target_coord = target_coord / coordinate_scale
+    coords = np.zeros((max_conditions, 3), dtype=np.float32)
+    distances = np.zeros((max_conditions, 1), dtype=np.float32)
+    for index, item in enumerate(selected):
+        coords[index] = np.asarray(item["coord"]) / coordinate_scale
+        distances[index, 0] = item["distance"] / coordinate_scale
+    metadata_single = jnp.asarray(
+        np.concatenate([coords, coords - np.asarray(target_coord[0]), distances], axis=-1)[None]
+    )
+
+    def generate(labels, source, mask, metadata, target_coord_value, rng):
+        latent = model.apply(
+            {"params": params}, c=labels, cfg_scale=1.0, source=source,
+            source_coord=jnp.zeros_like(target_coord_value), target_coord=target_coord_value,
+            condition_mask=mask, condition_metadata=metadata,
+            rngs=prepare_rng(rng, ["noise"]), train=False,
+        )["samples"]
+        decoded = decode_fn(latent.transpose(0, 3, 1, 2))
+        return jnp.clip((decoded + 1) / 2, 0, 1)
+
+    generate_jit = jax.jit(generate)
+    outdir = Path(args.outdir).expanduser().resolve()
+    outdir.mkdir(parents=True, exist_ok=True)
+    (outdir / "conditions.txt").write_text(
+        "\n".join(item["path"] for item in selected) + "\n", encoding="utf-8"
+    )
+    saved = 0
+    while saved < args.num_samples:
+        batch = min(args.batch_size, args.num_samples - saved)
+        images = generate_jit(
+            jnp.zeros((batch,), dtype=jnp.int32),
+            jnp.repeat(source_single, batch, axis=0),
+            jnp.repeat(mask_single, batch, axis=0),
+            jnp.repeat(metadata_single, batch, axis=0),
+            jnp.repeat(target_coord, batch, axis=0),
+            jax.random.PRNGKey(args.seed + saved),
+        )
+        images = _to_uint8_images(np.asarray(images))
+        for index, image in enumerate(images):
+            Image.fromarray(image).save(outdir / f"sample_{saved + index:06d}.png")
+        saved += batch
+    print(f"Saved {saved} samples for {args.target_id} to {outdir}")
+
+
+if __name__ == "__main__":
+    main()

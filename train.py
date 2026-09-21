@@ -341,6 +341,16 @@ def train_step_conditional(
     negative = enforce_ddp(batch["negative"])
     source_coord = enforce_ddp(batch["source_coord"])
     target_coord = enforce_ddp(batch["target_coord"])
+    condition_mask = enforce_ddp(batch["condition_mask"]) if "condition_mask" in batch else None
+    condition_metadata = None
+    if "condition_coord" in batch:
+        condition_coord = enforce_ddp(batch["condition_coord"])
+        condition_distance = enforce_ddp(batch["condition_distance"])
+        target_for_conditions = target_coord[:, None, :]
+        condition_metadata = jnp.concatenate(
+            [condition_coord, condition_coord - target_for_conditions, condition_distance],
+            axis=-1,
+        )
     labels = enforce_ddp(batch["labels"])
     bsz = source.shape[0]
     n_pos = target_ref.shape[1]
@@ -393,9 +403,24 @@ def train_step_conditional(
 
     def loss_fn(params):
         repeated_labels = enforce_ddp(repeat(labels, "b -> (b g)", g=gen_per_label))
-        repeated_source = enforce_ddp(repeat(source, "b h w c -> (b g) h w c", g=gen_per_label))
+        if source.ndim == 5:
+            repeated_source = enforce_ddp(
+                repeat(source, "b k h w c -> (b g) k h w c", g=gen_per_label)
+            )
+        else:
+            repeated_source = enforce_ddp(
+                repeat(source, "b h w c -> (b g) h w c", g=gen_per_label)
+            )
         repeated_source_coord = enforce_ddp(repeat(source_coord, "b d -> (b g) d", g=gen_per_label))
         repeated_target_coord = enforce_ddp(repeat(target_coord, "b d -> (b g) d", g=gen_per_label))
+        repeated_condition_mask = (
+            enforce_ddp(repeat(condition_mask, "b k -> (b g) k", g=gen_per_label))
+            if condition_mask is not None else None
+        )
+        repeated_condition_metadata = (
+            enforce_ddp(repeat(condition_metadata, "b k d -> (b g) k d", g=gen_per_label))
+            if condition_metadata is not None else None
+        )
         gen_samples = state.apply_fn(
             {"params": params},
             train=True,
@@ -405,6 +430,8 @@ def train_step_conditional(
             source=repeated_source,
             source_coord=repeated_source_coord,
             target_coord=repeated_target_coord,
+            condition_mask=repeated_condition_mask,
+            condition_metadata=repeated_condition_metadata,
         )["samples"]
         if log_gen_diagnostics:
             gen_samples_f32 = gen_samples.astype(jnp.float32)
@@ -422,6 +449,15 @@ def train_step_conditional(
             feature_pos = enforce_ddp(rearrange(feature_pos, "b x f d -> (b f) x d"))
             feature_neg = enforce_ddp(rearrange(feature_neg, "b x f d -> (b f) x d"))
             feature_gen = enforce_ddp(rearrange(gen_feature, "b x f d -> (b f) x d"))
+            positive_mask = None
+            if "positive_mask" in batch:
+                base_mask = batch["positive_mask"]
+                positive_mask = repeat(
+                    base_mask,
+                    "b p -> (b f) g p",
+                    f=gen_feature.shape[2],
+                    g=gen_per_label,
+                )
             loss, info = drift_loss(
                 gen=feature_gen,
                 fixed_pos=feature_pos,
@@ -429,6 +465,7 @@ def train_step_conditional(
                 weight_gen=jnp.ones_like(feature_gen[:, :, 0]),
                 weight_pos=jnp.ones_like(feature_pos[:, :, 0]),
                 weight_neg=jnp.ones_like(feature_neg[:, :, 0]),
+                positive_mask=positive_mask,
                 **loss_kwargs,
             )
             # Unlike the normalized drift objective, this auxiliary metric has a

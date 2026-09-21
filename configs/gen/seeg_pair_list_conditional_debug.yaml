@@ -1,0 +1,115 @@
+hsdp_dim: 1
+
+logging:
+  project: "seeg-pair-list-conditional-debug"
+  entity: ""
+  use_wandb: false
+  log_every_k: 20
+  console_preview_keys:
+    - loss
+    - loss_drift
+    - loss_pair
+    - g_norm
+    - gen_abs_max
+    - val/loss
+
+dataset:
+  mode: pair_list_spectrogram
+  table_path: "~/reduced_pair_table.csv"
+  image_root: "~/spectrogram_dataset"
+  split_manifest: "~/seeg_patient_split.json"
+  resolution: 256
+  use_latent: true
+  use_cache: false
+  use_natural_vae: true
+  num_classes: 1
+  max_conditions: 8
+  k_neg: 4
+  coordinate_scale: 100.0
+  seed: 42
+  batch_size: 8
+  eval_batch_size: 8
+  kwargs:
+    num_workers: 0
+    pin_memory: false
+    prefetch_factor: 2
+
+model:
+  cond_dim: 256
+  input_size: 32
+  in_channels: 4
+  noise_in_channels: 4
+  source_in_channels: 0
+  condition_channels: 4
+  condition_metadata_dim: 7
+  use_condition_set: true
+  out_channels: 4
+  pixel_range: "minus_one_one"
+  output_activation: "identity"
+  use_coord_cond: false
+  coord_dim: 3
+  patch_size: 2
+  hidden_size: 256
+  depth: 4
+  num_heads: 4
+  mlp_ratio: 4.0
+  use_qknorm: true
+  use_swiglu: true
+  use_rope: true
+  use_rmsnorm: true
+  n_cls_tokens: 4
+  noise_classes: 16
+  noise_coords: 16
+  use_bf16: true
+  attn_fp32: true
+  use_remat: false
+
+optimizer:
+  lr_schedule:
+    learning_rate: 0.00001
+    warmup_steps: 200
+    lr_schedule: "const"
+    total_steps: 2000
+  weight_decay: 0.01
+  adam_b1: 0.9
+  adam_b2: 0.95
+
+train:
+  conditional: true
+  train_batch_size: 8
+  seed: 42
+  total_steps: 2000
+  save_per_step: 500
+  keep_every: 500
+  keep_last: 4
+  enable_eval: false
+  sanity_eval_at_step1: false
+  enable_val_loss: true
+  val_loss_per_step: 100
+  val_loss_batches: 2
+  log_gen_diagnostics: true
+  log_update_diagnostics: false
+  max_grad_norm: 0.5
+  lambda_drift: 1.0
+  # Stabilizes the known paired prediction task in VAE latent space.
+  lambda_pair: 0.1
+  lambda_condition: 0.0
+  lambda_tv: 0.0
+  forward_dict:
+    gen_per_label: 2
+  activation_kwargs:
+    patch_mean_size: [2]
+    patch_std_size: [2]
+    use_std: true
+    use_mean: true
+    every_k_block: 2
+  loss_kwargs:
+    R_list: [0.2]
+  ema_decay: 0.999
+  init_from: ""
+
+feature:
+  mae_path: "hf://mae_latent_256"
+  use_convnext: false
+  use_mae: true
+  include_raw_global: false

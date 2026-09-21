@@ -19,6 +19,7 @@ def drift_loss(
     weight_gen=None,
     weight_pos=None,
     weight_neg=None,
+    positive_mask=None,
     R_list=(0.02, 0.05, 0.2),
 ):
     '''
@@ -57,6 +58,13 @@ def drift_loss(
     weight_gen = weight_gen.astype(jnp.float32)
     weight_pos = weight_pos.astype(jnp.float32)
     weight_neg = weight_neg.astype(jnp.float32)
+    if positive_mask is not None:
+        positive_mask = positive_mask.astype(jnp.float32)
+        expected = (B, C_g, C_p)
+        if positive_mask.shape != expected:
+            raise ValueError(
+                f"positive_mask must have shape {expected}, got {positive_mask.shape}."
+            )
     old_gen = jax.lax.stop_gradient(gen)
     targets = jnp.concatenate([old_gen, fixed_neg, fixed_pos], axis=1)
     targets_w = jnp.concatenate([weight_gen, weight_neg, weight_pos], axis=1)
@@ -99,6 +107,10 @@ def drift_loss(
             split_idx = C_g + C_n
             aff_neg = affinity[:, :, :split_idx]
             aff_pos = affinity[:, :, split_idx:]
+            # Conditional drifting: incompatible real positives must not affect
+            # either the attractive direction or its subsequent normalization.
+            if positive_mask is not None:
+                aff_pos = aff_pos * positive_mask
             
             sum_pos = jnp.sum(aff_pos, axis=-1, keepdims=True)
             r_coeff_neg = -aff_neg * sum_pos 

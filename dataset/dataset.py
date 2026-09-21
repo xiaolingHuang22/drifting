@@ -211,6 +211,7 @@ def create_imagenet_split(
 def get_postprocess_fn(*, use_aug: bool = False, use_latent: bool = False, use_cache: bool = False, has_clip: bool = True):
     """Return postprocess function for generated samples by dataset mode flags."""
     if use_latent or use_cache:
+        from dataset.vae import vae_enc_decode
         _, decode_fn = vae_enc_decode()
 
         def postprocess(images):

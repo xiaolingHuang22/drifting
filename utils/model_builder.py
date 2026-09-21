@@ -9,6 +9,7 @@ from dataset.conditional_imagefolder import (
     create_conditional_imagefolder_split,
 )
 from dataset.paired_spectrogram import create_paired_spectrogram_split
+from dataset.pair_list_spectrogram import create_pair_list_spectrogram_split
 from utils.logging import WandbLogger
 from utils.misc import EasyDict
 
@@ -186,6 +187,36 @@ def build_model_dict(config, model_class, *, workdir: str = "runs"):
             f"{train_loader.dataset.class_to_idx}"
         )
         dataset_name = f"conditional_imagefolder{resolution}"
+    elif dataset_mode == "pair_list_spectrogram":
+        table_path = config.dataset.get("table_path", None)
+        image_root = config.dataset.get("image_root", None)
+        split_manifest = config.dataset.get("split_manifest", None)
+        if not all((table_path, image_root, split_manifest)):
+            raise ValueError(
+                "pair_list_spectrogram requires dataset.table_path, image_root, "
+                "and split_manifest."
+            )
+        common = dict(
+            table_path=table_path,
+            image_root=image_root,
+            split_manifest=split_manifest,
+            resolution=resolution,
+            max_conditions=int(config.dataset.get("max_conditions", 8)),
+            k_neg=int(config.dataset.get("k_neg", 4)),
+            use_natural_vae=bool(config.dataset.get("use_natural_vae", True)),
+            coordinate_scale=float(config.dataset.get("coordinate_scale", 100.0)),
+            seed=int(config.dataset.get("seed", config.train.get("seed", 42))),
+            **dataset_kwargs,
+        )
+        train_loader, preprocess_fn, postprocess_fn = create_pair_list_spectrogram_split(
+            split="train", batch_size=batch_size_per_node, **common
+        )
+        eval_loader, _, _ = create_pair_list_spectrogram_split(
+            split="val",
+            batch_size=config.dataset.eval_batch_size // jax.process_count(),
+            **common,
+        )
+        dataset_name = f"pair_list_spectrogram{resolution}"
     elif dataset_mode == "paired_spectrogram":
         if use_latent or use_cache:
             raise ValueError(
