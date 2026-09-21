@@ -204,6 +204,7 @@ def build_model_dict(config, model_class, *, workdir: str = "runs"):
             max_conditions=int(config.dataset.get("max_conditions", 8)),
             k_neg=int(config.dataset.get("k_neg", 4)),
             use_natural_vae=bool(config.dataset.get("use_natural_vae", True)),
+            latent_root=config.dataset.get("latent_root", None),
             coordinate_scale=float(config.dataset.get("coordinate_scale", 100.0)),
             seed=int(config.dataset.get("seed", config.train.get("seed", 42))),
             **dataset_kwargs,

@@ -1,3 +1,13 @@
+import warnings
+
+# Diffusers emits this once for every traced Flax encode/decode call.  The
+# released repository still depends on FlaxAutoencoderKL, so keep the warning
+# actionable in documentation without flooding long training logs.
+warnings.filterwarnings(
+    "once",
+    message=r"Flax classes are deprecated and will be removed in Diffusers.*",
+)
+
 from diffusers.models import FlaxAutoencoderKL
 from functools import partial
 import jax.numpy as jnp

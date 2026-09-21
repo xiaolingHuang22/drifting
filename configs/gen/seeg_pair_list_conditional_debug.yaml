@@ -21,14 +21,19 @@ dataset:
   resolution: 256
   use_latent: true
   use_cache: false
-  use_natural_vae: true
+  # Pre-cache latents before training; online VAE encoding of every pair list
+  # has a very large transient GPU-memory cost.
+  use_natural_vae: false
+  latent_root: "~/spectrogram_pair_list_latent_cache"
   num_classes: 1
-  max_conditions: 8
-  k_neg: 4
+  max_conditions: 4
+  k_neg: 1
   coordinate_scale: 100.0
   seed: 42
-  batch_size: 8
-  eval_batch_size: 8
+  # Deliberately conservative: the frozen MAE is large. Increase only after
+  # the one-sample pipeline completes a train and validation step.
+  batch_size: 1
+  eval_batch_size: 1
   kwargs:
     num_workers: 0
     pin_memory: false
@@ -76,7 +81,7 @@ optimizer:
 
 train:
   conditional: true
-  train_batch_size: 8
+  train_batch_size: 1
   seed: 42
   total_steps: 2000
   save_per_step: 500
@@ -96,7 +101,7 @@ train:
   lambda_condition: 0.0
   lambda_tv: 0.0
   forward_dict:
-    gen_per_label: 2
+    gen_per_label: 1
   activation_kwargs:
     patch_mean_size: [2]
     patch_std_size: [2]

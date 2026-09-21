@@ -151,6 +151,7 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
         max_conditions=8,
         k_neg=4,
         resolution=256,
+        latent_root=None,
         training=False,
         seed=42,
     ):
@@ -158,6 +159,9 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
         self.seed = int(seed)
         self.max_conditions = int(max_conditions)
         self.k_neg = int(k_neg)
+        self.latent_root = (
+            Path(latent_root).expanduser().resolve() if latent_root else None
+        )
         allowed = set(split_patients)
         self.records = []
         for record in records:
@@ -189,6 +193,18 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
         return len(self.records)
 
     def _load(self, path):
+        if self.latent_root is not None:
+            image_path = Path(path)
+            latent_path = self.latent_root / image_path.parent.name / f"{image_path.stem}.npy"
+            if not latent_path.is_file():
+                raise FileNotFoundError(
+                    f"Missing cached VAE latent for {image_path}: {latent_path}. "
+                    "Build the cache with python -m dataset.pair_list_latent_cache."
+                )
+            latent = np.load(latent_path, allow_pickle=False)
+            if latent.ndim != 3 or latent.shape[-1] != 4:
+                raise ValueError(f"Expected HWC latent with 4 channels, got {latent.shape}: {latent_path}")
+            return torch.from_numpy(latent.transpose(2, 0, 1).copy()).float()
         with Image.open(path) as image:
             return self.transform(image.convert("RGB"))
 
@@ -232,14 +248,16 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
 
 def create_pair_list_spectrogram_split(
     *, table_path, image_root, split_manifest, split, resolution, batch_size,
-    max_conditions=8, k_neg=4, use_natural_vae=True, coordinate_scale=100.0, seed=42,
+    max_conditions=8, k_neg=4, use_natural_vae=True, latent_root=None,
+    coordinate_scale=100.0, seed=42,
     num_workers=0, prefetch_factor=2, pin_memory=False,
 ):
     records = build_pair_list_records(table_path, image_root)
     manifest = json.loads(Path(split_manifest).expanduser().read_text(encoding="utf-8"))
     ds = PairListSpectrogramDataset(
         records, manifest[split], max_conditions=max_conditions, k_neg=k_neg,
-        resolution=resolution, training=(split == "train"), seed=seed,
+        resolution=resolution, latent_root=latent_root,
+        training=(split == "train"), seed=seed,
     )
     sampler = DistributedSampler(
         ds, num_replicas=jax.process_count(), rank=jax.process_index(), shuffle=(split == "train")
@@ -254,6 +272,8 @@ def create_pair_list_spectrogram_split(
         kwargs.update(prefetch_factor=prefetch_factor, multiprocessing_context="spawn")
     loader = DataLoader(**kwargs)
     encode_fn = decode_fn = None
+    if latent_root and use_natural_vae:
+        raise ValueError("Use either latent_root or online use_natural_vae, not both.")
     if use_natural_vae:
         from dataset.vae import vae_enc_decode
         encode_fn, decode_fn = vae_enc_decode()

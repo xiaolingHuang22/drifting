@@ -60,12 +60,39 @@ compatibility are not automatically declared negative.
 ## 3. Temporary natural-image VAE
 
 The released `pcuenq/sd-vae-ft-mse-flax` encodes target, conditions, and
-negatives online.  Pixel tensors are RGB, resized to 256, and normalized to
-`[-1,1]`; the VAE produces 32x32x4 latents.  Generator and drifting losses run
-in this latent space.  Always inspect VAE reconstructions before a long run.
+negatives. Pixel tensors are RGB, resized to 256, and normalized to `[-1,1]`;
+the VAE produces 32x32x4 latents. Do not encode every variable-length pair list
+online during training: that materializes `batch × conditions` full-resolution
+VAE activations alongside the generator and MAE and can request tens of GB of
+GPU memory. Build the cache once, one image at a time:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m dataset.pair_list_latent_cache \
+  --table-path ~/reduced_pair_table.csv \
+  --image-root ~/spectrogram_dataset \
+  --target-root ~/spectrogram_pair_list_latent_cache
+```
+
+The config reads those `.npy` latents through `dataset.latent_root`, so the VAE
+is not invoked by DataLoader batches. Generator and drifting losses then run in
+latent space. Always inspect VAE reconstructions before a long run.
 If clinically important spectrogram structure is lost, stop and train a
 domain-specific SEEG VAE rather than tuning the generator around a lossy
 representation.
+
+The first cache build downloads `pcuenq/sd-vae-ft-mse-flax` from Hugging Face.
+The unauthenticated-request message is not an error; set `HF_TOKEN` if the
+server's rate limit is a concern. Diffusers also warns that its Flax VAE class
+is deprecated. This repository currently requires that class, but the cache
+command invokes it outside the long training loop and warning output is
+rate-limited. Pin the tested Diffusers version rather than upgrading across its
+eventual Flax removal.
+
+The debug config intentionally starts with batch size 1, four conditions, one
+negative, and one generated sample. After it completes both training and
+validation steps, increase one dimension at a time while watching `nvidia-smi`.
+Two visible GPUs do not combine their memory when the command is restricted to
+one device with `CUDA_VISIBLE_DEVICES=0`.
 
 ## 4. Inject the condition set
 
