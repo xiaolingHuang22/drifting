@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image
 from torchvision import transforms
 
-from dataset.pair_list_spectrogram import build_pair_list_records
+from dataset.pair_list_spectrogram import build_pair_list_records, latent_cache_path
 from dataset.vae import vae_enc_decode
 from utils.hsdp_util import set_global_mesh
 from utils.misc import run_init
@@ -21,6 +21,7 @@ def main():
     parser.add_argument("--table-path", required=True)
     parser.add_argument("--image-root", required=True)
     parser.add_argument("--target-root", required=True)
+    parser.add_argument("--split-manifest", default=None)
     parser.add_argument("--resolution", type=int, default=256)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
@@ -29,9 +30,9 @@ def main():
     set_global_mesh(1)
     image_root = Path(args.image_root).expanduser().resolve()
     target_root = Path(args.target_root).expanduser().resolve()
-    records = build_pair_list_records(args.table_path, image_root)
+    records = build_pair_list_records(args.table_path, image_root, args.split_manifest)
     paths = {Path(record["target_path"]) for record in records}
-    paths.update(Path(item["path"]) for record in records for item in record["conditions"])
+    paths.update(Path(path) for record in records for item in record["conditions"] for path in item.get("paths", [item["path"]]))
     transform = transforms.Compose([
         transforms.Resize((args.resolution, args.resolution), antialias=True),
         transforms.ToTensor(),
@@ -40,7 +41,7 @@ def main():
     encode_fn, _ = vae_enc_decode()
     written = skipped = 0
     for index, image_path in enumerate(sorted(paths)):
-        output = target_root / image_path.parent.name / f"{image_path.stem}.npy"
+        output = latent_cache_path(target_root, image_path, image_root)
         if output.exists() and not args.overwrite:
             skipped += 1
             continue

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import random
 from pathlib import Path
 
 import jax
@@ -11,7 +12,7 @@ import numpy as np
 from PIL import Image
 from torchvision import transforms
 
-from dataset.pair_list_spectrogram import build_pair_list_records
+from dataset.pair_list_spectrogram import build_pair_list_records, latent_cache_path, load_patient_split, select_conditions
 from dataset.vae import vae_enc_decode
 from sample_only import _to_uint8_images
 from utils.env import HF_ROOT
@@ -25,6 +26,8 @@ def main():
     parser.add_argument("--init-from", required=True)
     parser.add_argument("--config", required=True)
     parser.add_argument("--target-id", required=True, help="For example: PID1,A10")
+    parser.add_argument("--target-segment", help="Exact target image filename; required for channels with multiple segments.")
+    parser.add_argument("--split", choices=("train", "val", "test"), default="test")
     parser.add_argument("--outdir", required=True)
     parser.add_argument("--num-samples", type=int, default=16)
     parser.add_argument("--batch-size", type=int, default=4)
@@ -45,20 +48,30 @@ def main():
         checkpoint_step=args.checkpoint_step,
     )
 
-    records = build_pair_list_records(config.dataset.table_path, config.dataset.image_root)
-    try:
-        record = next(item for item in records if item["target_id"] == args.target_id)
-    except StopIteration as exc:
-        raise ValueError(f"Unknown target ID {args.target_id!r}.") from exc
+    image_root = Path(config.dataset.image_root).expanduser().resolve()
+    manifest = load_patient_split(config.dataset.split_manifest)
+    segmented = any((image_root / split).is_dir() for split in ("train", "val", "test"))
+    records = build_pair_list_records(config.dataset.table_path, image_root,
+                                      config.dataset.split_manifest if segmented else None)
+    allowed = set(manifest[args.split])
+    matches = [r for r in records if r["target_patient"] in allowed
+               and (r["target_id"] == args.target_id or r.get("channel_id") == args.target_id)
+               and (not args.target_segment or Path(r["target_path"]).name == args.target_segment)]
+    if len(matches) != 1:
+        raise ValueError(f"Expected one target in {args.split}, found {len(matches)}. Specify --target-segment for a multi-segment channel.")
+    record = dict(matches[0])
+    record["conditions"] = [c for c in record["conditions"] if c["patient"] in allowed]
+    if not record["conditions"]:
+        raise ValueError("No donor channels remain in the requested patient split.")
     max_conditions = int(config.dataset.get("max_conditions", 8))
-    selected = record["conditions"][:max_conditions]
+    selected = select_conditions(record, max_conditions, random.Random(args.seed))
     latent_root_value = config.dataset.get("latent_root", None)
     latent_root = Path(latent_root_value).expanduser().resolve() if latent_root_value else None
     if latent_root is not None:
         condition_latents = []
         for item in selected:
             image_path = Path(item["path"])
-            latent_path = latent_root / image_path.parent.name / f"{image_path.stem}.npy"
+            latent_path = latent_cache_path(latent_root, image_path, image_root)
             if not latent_path.is_file():
                 raise FileNotFoundError(
                     f"Missing cached condition latent: {latent_path}. Build it with "
@@ -133,7 +146,7 @@ def main():
         target_image.convert("RGB").save(outdir / "target_original.png")
     if latent_root is not None:
         target_latent_path = (
-            latent_root / target_image_path.parent.name / f"{target_image_path.stem}.npy"
+            latent_cache_path(latent_root, target_image_path, image_root)
         )
         if not target_latent_path.is_file():
             raise FileNotFoundError(f"Missing cached target latent: {target_latent_path}")

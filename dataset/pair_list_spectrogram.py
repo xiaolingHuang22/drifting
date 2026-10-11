@@ -13,6 +13,7 @@ import csv
 import json
 import math
 import random
+import re
 from collections import defaultdict
 from functools import partial
 from pathlib import Path
@@ -42,17 +43,69 @@ def _channel(value: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
-def _image_path(root: Path, patient: str, channel: str) -> Path:
-    path = root / patient / f"{patient}_{channel}.png"
-    if not path.is_file():
-        raise FileNotFoundError(f"Missing spectrogram image: {path}")
-    return path
+def load_patient_split(path):
+    manifest = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    seen = set()
+    for split in ("train", "val", "test"):
+        patients = manifest.get(split)
+        if not isinstance(patients, list) or not all(isinstance(p, str) for p in patients):
+            raise ValueError(f"Split {split} must contain a list of patient identifiers.")
+        if len(set(patients)) != len(patients) or seen.intersection(patients):
+            raise ValueError(f"Duplicate or overlapping patients in split {split}.")
+        seen.update(patients)
+    return manifest
 
 
-def build_pair_list_records(table_path: str | Path, image_root: str | Path):
-    """Group pair-table rows into one validated record per target channel."""
+def image_paths(root, patient, channel, manifest=None):
+    if manifest is not None:
+        split = next((s for s in ("train", "val", "test") if patient in manifest[s]), None)
+        if split is None:
+            raise ValueError(f"Pair-table patient {patient!r} is absent from the split manifest.")
+        # Patient and channel identifiers come from directories, never filename parsing.
+        folder = root / split / patient / channel
+        paths = sorted(p for p in folder.glob("*") if p.suffix.lower() in (".png", ".jpg", ".jpeg") and p.is_file())
+    else:
+        paths = [root / patient / f"{patient}_{channel}.png"]
+        paths = [p for p in paths if p.is_file()]
+    if not paths:
+        raise FileNotFoundError(f"No spectrogram images for {patient},{channel} under {root}")
+    return [str(p) for p in paths]
+
+
+def latent_cache_path(latent_root, image_path, image_root=None):
+    image_path = Path(image_path)
+    relative = image_path.relative_to(Path(image_root).expanduser().resolve()) if image_root else Path(image_path.parent.name) / image_path.name
+    return Path(latent_root) / relative.with_suffix(".npy")
+
+
+def select_conditions(record, max_conditions, rng, training=False):
+    conditions = list(record["conditions"])
+    if training:
+        rng.shuffle(conditions)
+    selected = []
+    for condition in conditions[:max_conditions]:
+        item = dict(condition)
+        item["path"] = rng.choice(item.get("paths", [item["path"]]))
+        selected.append(item)
+    return selected
+
+
+def build_pair_list_records(table_path: str | Path, image_root: str | Path, split_manifest=None):
+    """Group channel metadata, then expand segmented channels into image records."""
     table_path = Path(table_path).expanduser().resolve()
     image_root = Path(image_root).expanduser().resolve()
+    manifest = load_patient_split(split_manifest) if split_manifest else None
+    if manifest is not None:
+        for split in ("train", "val", "test"):
+            for folder in (image_root / split).iterdir():
+                if folder.is_dir() and folder.name not in manifest[split]:
+                    raise ValueError(f"Patient folder {folder} disagrees with the split manifest.")
+    path_index = {}
+    def paths(patient, channel):
+        key = (patient, channel)
+        if key not in path_index:
+            path_index[key] = image_paths(image_root, patient, channel, manifest)
+        return path_index[key]
     grouped = {}
     with table_path.open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
@@ -83,7 +136,8 @@ def build_pair_list_records(table_path: str | Path, image_root: str | Path):
                     "target_channel": tc,
                     "region": row["location"].strip(),
                     "target_coord": target_coord,
-                    "target_path": str(_image_path(image_root, tp, tc)),
+                    "target_path": paths(tp, tc)[0],
+                    "target_paths": paths(tp, tc),
                     "conditions": {},
                 },
             )
@@ -96,7 +150,8 @@ def build_pair_list_records(table_path: str | Path, image_root: str | Path):
                 "channel": cc,
                 "coord": cond_coord,
                 "distance": distance,
-                "path": str(_image_path(image_root, cp, cc)),
+                "path": paths(cp, cc)[0],
+                "paths": paths(cp, cc),
             }
     records = []
     for record in grouped.values():
@@ -105,7 +160,14 @@ def build_pair_list_records(table_path: str | Path, image_root: str | Path):
             record["conditions"].values(), key=lambda item: (item["distance"], item["channel_id"])
         )
         if record["conditions"]:
-            records.append(record)
+            for path in record["target_paths"]:
+                item = dict(record, target_path=path, channel_id=record["target_id"])
+                if manifest is not None:
+                    item["target_id"] = f'{record["target_id"]}/{Path(path).name}'
+                    match = re.search(r"_(\d+)_(\d+)$", Path(path).stem)
+                    if match:
+                        item["segment_seconds"] = tuple(map(int, match.groups()))
+                records.append(item)
     return sorted(records, key=lambda item: item["target_id"])
 
 
@@ -153,8 +215,10 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
         resolution=256,
         latent_root=None,
         training=False,
+        image_root=None,
         seed=42,
     ):
+        self.image_root = image_root
         self.training = bool(training)
         self.seed = int(seed)
         self.max_conditions = int(max_conditions)
@@ -176,12 +240,12 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
             raise ValueError("No pair-list records remain after patient-disjoint filtering.")
         self.regions = sorted({r["region"] for r in self.records})
         self.region_to_idx = {name: i for i, name in enumerate(self.regions)}
-        self.negative_pools = {
-            r["target_id"]: [x for x in self.records if x["region"] != r["region"]]
-            for r in self.records
+        # Store one pool per region, rather than one O(N) list per image.
+        self.records_by_region = {
+            region: [r for r in self.records if r["region"] == region]
+            for region in self.regions
         }
-        empty = [key for key, value in self.negative_pools.items() if not value]
-        if empty:
+        if len(self.regions) < 2:
             raise ValueError("Need at least two brain regions to sample incompatible negatives.")
         ops = [transforms.Resize((resolution, resolution), antialias=True)]
         if training:
@@ -195,7 +259,7 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
     def _load(self, path):
         if self.latent_root is not None:
             image_path = Path(path)
-            latent_path = self.latent_root / image_path.parent.name / f"{image_path.stem}.npy"
+            latent_path = latent_cache_path(self.latent_root, image_path, self.image_root)
             if not latent_path.is_file():
                 raise FileNotFoundError(
                     f"Missing cached VAE latent for {image_path}: {latent_path}. "
@@ -211,10 +275,7 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
     def __getitem__(self, index):
         record = self.records[index]
         rng = random.Random() if self.training else random.Random(self.seed + index)
-        conditions = list(record["conditions"])
-        if self.training:
-            rng.shuffle(conditions)
-        conditions = conditions[:self.max_conditions]
+        conditions = select_conditions(record, self.max_conditions, rng, self.training)
         target = self._load(record["target_path"])
         condition_images = torch.zeros(
             self.max_conditions, target.shape[0], target.shape[1], target.shape[2]
@@ -227,8 +288,9 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
             condition_coords[i] = torch.tensor(condition["coord"], dtype=torch.float32)
             condition_distances[i, 0] = float(condition["distance"])
             condition_mask[i] = 1.0
-        negative_pool = self.negative_pools[record["target_id"]]
-        negatives = [rng.choice(negative_pool) for _ in range(self.k_neg)]
+        other_regions = [r for r in self.regions if r != record["region"]]
+        weights = [len(self.records_by_region[r]) for r in other_regions]
+        negatives = [rng.choice(self.records_by_region[rng.choices(other_regions, weights=weights)[0]]) for _ in range(self.k_neg)]
         return {
             "source": condition_images,
             "condition_mask": condition_mask,
@@ -252,11 +314,12 @@ def create_pair_list_spectrogram_split(
     coordinate_scale=100.0, seed=42,
     num_workers=0, prefetch_factor=2, pin_memory=False,
 ):
-    records = build_pair_list_records(table_path, image_root)
-    manifest = json.loads(Path(split_manifest).expanduser().read_text(encoding="utf-8"))
+    records = build_pair_list_records(table_path, image_root, split_manifest if any((Path(image_root).expanduser() / s).is_dir() for s in ("train", "val", "test")) else None)
+    manifest = load_patient_split(split_manifest)
     ds = PairListSpectrogramDataset(
         records, manifest[split], max_conditions=max_conditions, k_neg=k_neg,
         resolution=resolution, latent_root=latent_root,
+        image_root=image_root,
         training=(split == "train"), seed=seed,
     )
     sampler = DistributedSampler(

@@ -20,15 +20,15 @@ logging:
 dataset:
   mode: pair_list_spectrogram
   table_path: "~/reduced_pair_table.csv"
-  image_root: "~/spectrogram_dataset"
-  split_manifest: "~/seeg_patient_split.json"
+  image_root: "~/RAE_first_exp"
+  split_manifest: "~/RAE_first_exp/documents/patient_split.json"
   resolution: 256
   use_latent: true
   use_cache: false
   # Pre-cache latents before training; online VAE encoding of every pair list
   # has a very large transient GPU-memory cost.
   use_natural_vae: false
-  latent_root: "~/spectrogram_pair_list_latent_cache"
+  latent_root: "~/RAE_first_exp_latent_cache"
   num_classes: 1
   max_conditions: 4
   k_neg: 1

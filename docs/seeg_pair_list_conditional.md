@@ -206,3 +206,47 @@ marginal spectral errors, and comparison plots.
 4. Compare exact-target masking with broader spatial compatibility masks.
 5. Add cross-attention over condition tokens only after pooled conditioning is
    stable.
+
+## Multi-segment dataset: RAE_first_exp
+
+The loader also supports `~/RAE_first_exp/{train,val,test}/PATIENT/CHANNEL/*.png`.
+Use the supplied patient split rather than generating a new one. The debug config
+expects `~/RAE_first_exp/documents/patient_split.json`; copy the supplied
+`patient_split_deindentified.json` there under that name, or set `split_manifest`
+to its actual location. The pair-table path remains `~/reduced_pair_table.csv`.
+Patient IDs in that table must exactly match directory/manifest IDs, including
+`FirstName_LastName`. Patient/channel identity is read from directories. An
+optional final `_START_END` filename suffix records segment seconds; other
+filename text is ignored. Times are not model inputs or matched across patients.
+
+Each target image becomes one example. Each selected donor channel contributes
+one randomly chosen segment; training also shuffles donor channels. Validation
+uses seeded, reproducible selections. Both target and donor patients stay in the
+requested split. Channels without in-split donors are excluded. The number of
+conditions, coordinates, VAE, generator, feature encoder, and losses stay the same.
+Image sampling weights channels/patients in proportion to their segment counts.
+
+Build a fresh cache with the same VAE (the hierarchy prevents filename collisions):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m dataset.pair_list_latent_cache \
+  --table-path ~/reduced_pair_table.csv \
+  --image-root ~/RAE_first_exp \
+  --split-manifest ~/RAE_first_exp/documents/patient_split.json \
+  --target-root ~/RAE_first_exp_latent_cache
+
+CUDA_VISIBLE_DEVICES=0 python main.py --gen \
+  --config configs/gen/seeg_pair_list_conditional_debug.yaml \
+  --workdir runs/seeg_segments_debug
+```
+
+Latents mirror paths, for example
+`train/HHFU059/A1/A1_HHFU059-20250409-00_1320_1440.npy`.
+The existing flat one-image-per-channel layout and its cache remain supported.
+Do not run the split-generation command above on an already split dataset.
+
+Inference now defaults to the test split and filters donors to that split. Select
+an exact image with `--target-id 'PATIENT,CHANNEL' --target-segment 'FILENAME.png'`;
+use `--split val` for validation or `--split train` for a training sanity check.
+The seed fixes donor-segment selection. `conditions.txt` records the chosen images.
+The target image remains an evaluation reference, never a generator input.
