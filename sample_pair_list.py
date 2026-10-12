@@ -28,6 +28,8 @@ def main():
     parser.add_argument("--target-id", required=True, help="For example: PID1,A10")
     parser.add_argument("--target-segment", help="Exact target image filename; required for channels with multiple segments.")
     parser.add_argument("--split", choices=("train", "val", "test"), default="test")
+    parser.add_argument("--training-condition-selection", action="store_true", help="Use seeded training donor-channel ordering for fixed-subset checks.")
+    parser.add_argument("--shuffle-condition-images", action="store_true", help="Replace donor images with seeded random in-split images while preserving condition metadata.")
     parser.add_argument("--outdir", required=True)
     parser.add_argument("--num-samples", type=int, default=16)
     parser.add_argument("--batch-size", type=int, default=4)
@@ -64,7 +66,16 @@ def main():
     if not record["conditions"]:
         raise ValueError("No donor channels remain in the requested patient split.")
     max_conditions = int(config.dataset.get("max_conditions", 8))
-    selected = select_conditions(record, max_conditions, random.Random(args.seed))
+    selected = select_conditions(record, max_conditions, random.Random(args.seed), training=args.training_condition_selection)
+    if args.shuffle_condition_images:
+        pool = sorted({path for r in records if r["target_patient"] in allowed
+                       for c in r["conditions"] if c["patient"] in allowed
+                       for path in c.get("paths", [c["path"]])}
+                      - {r["target_path"] for r in matches})
+        if not pool:
+            raise ValueError("No in-split images available for condition shuffling.")
+        shuffle_rng = random.Random(args.seed + 100000)
+        selected = [dict(c, path=shuffle_rng.choice([p for p in pool if p != c["path"]] or pool)) for c in selected]
     latent_root_value = config.dataset.get("latent_root", None)
     latent_root = Path(latent_root_value).expanduser().resolve() if latent_root_value else None
     if latent_root is not None:

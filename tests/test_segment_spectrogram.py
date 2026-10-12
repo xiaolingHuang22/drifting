@@ -3,6 +3,7 @@ import json
 import random
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import numpy as np
@@ -50,12 +51,33 @@ class SegmentDatasetTest(unittest.TestCase):
             ds = PairListSpectrogramDataset(records, manifest['train'], max_conditions=4, k_neg=1, latent_root=cache, image_root=images)
             self.assertEqual(len(ds), 8)
             self.assertTrue(all(c['patient'] in manifest['train'] for r in ds.records for c in r['conditions']))
+            fixed = PairListSpectrogramDataset(records, manifest['train'], max_conditions=4,
+                        k_neg=1, latent_root=cache, image_root=images, training=True,
+                        fixed_conditions=True, max_targets=8, seed=42)
+            self.assertEqual(len(fixed), 8)
+            self.assertTrue(np.array_equal(fixed[0]['source'], fixed[0]['source']))
+            self.assertEqual([r['target_id'] for r in fixed.records],
+                [r['target_id'] for r in PairListSpectrogramDataset(records, manifest['train'],
+                     max_targets=8, seed=42).records])
             sample = ds[0]
             self.assertEqual(tuple(sample['source'].shape), (4, 4, 32, 32))
             self.assertEqual(tuple(sample['target_true'].shape), (4, 32, 32))
             self.assertEqual(tuple(sample['negative'].shape), (1, 4, 32, 32))
             self.assertEqual(select_conditions(ds.records[0], 4, random.Random(7)), select_conditions(ds.records[0], 4, random.Random(7)))
             self.assertEqual(len({latent_cache_path(cache, p, images) for p in images.rglob('*.png')}), 24)
+            import yaml
+            from tools.seeg_checks import main
+            config_path = root / 'config.yaml'
+            config_path.write_text(yaml.safe_dump({'dataset': {
+                'image_root': str(images), 'table_path': str(table),
+                'split_manifest': str(split_path), 'train_max_targets': 8,
+                'max_conditions': 4, 'seed': 42}}))
+            report_path = root / 'audit.json'
+            with patch('sys.argv', ['checks', 'audit', '--config', str(config_path), '--output', str(report_path)]):
+                main()
+            report = json.loads(report_path.read_text())
+            self.assertEqual(report['train']['retained_segments'], 8)
+            self.assertEqual(len(report['overfit_targets']), 8)
             manifest['val'].append(manifest['train'][0])
             split_path.write_text(json.dumps(manifest))
             with self.assertRaises(ValueError):

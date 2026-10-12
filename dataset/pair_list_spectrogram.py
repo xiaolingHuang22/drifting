@@ -216,8 +216,11 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
         latent_root=None,
         training=False,
         image_root=None,
+        max_targets=None,
+        fixed_conditions=False,
         seed=42,
     ):
+        self.fixed_conditions = bool(fixed_conditions)
         self.image_root = image_root
         self.training = bool(training)
         self.seed = int(seed)
@@ -238,6 +241,11 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
                 self.records.append(item)
         if not self.records:
             raise ValueError("No pair-list records remain after patient-disjoint filtering.")
+        if max_targets is not None:
+            if int(max_targets) <= 0:
+                raise ValueError("max_targets must be positive.")
+            # Seeded sample across patients/channels, rather than the first channel.
+            self.records = random.Random(self.seed).sample(self.records, min(int(max_targets), len(self.records)))
         self.regions = sorted({r["region"] for r in self.records})
         self.region_to_idx = {name: i for i, name in enumerate(self.regions)}
         # Store one pool per region, rather than one O(N) list per image.
@@ -274,7 +282,7 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
         record = self.records[index]
-        rng = random.Random() if self.training else random.Random(self.seed + index)
+        rng = random.Random() if self.training and not self.fixed_conditions else random.Random(self.seed + index)
         conditions = select_conditions(record, self.max_conditions, rng, self.training)
         target = self._load(record["target_path"])
         condition_images = torch.zeros(
@@ -313,6 +321,7 @@ def create_pair_list_spectrogram_split(
     max_conditions=8, k_neg=4, use_natural_vae=True, latent_root=None,
     coordinate_scale=100.0, seed=42,
     num_workers=0, prefetch_factor=2, pin_memory=False,
+    train_max_targets=None, fixed_conditions=False,
 ):
     records = build_pair_list_records(table_path, image_root, split_manifest if any((Path(image_root).expanduser() / s).is_dir() for s in ("train", "val", "test")) else None)
     manifest = load_patient_split(split_manifest)
@@ -320,6 +329,8 @@ def create_pair_list_spectrogram_split(
         records, manifest[split], max_conditions=max_conditions, k_neg=k_neg,
         resolution=resolution, latent_root=latent_root,
         image_root=image_root,
+        max_targets=train_max_targets if split == "train" else None,
+        fixed_conditions=fixed_conditions,
         training=(split == "train"), seed=seed,
     )
     sampler = DistributedSampler(
