@@ -21,7 +21,7 @@ dataset:
   mode: pair_list_spectrogram
   table_path: "~/reduced_pair_table.csv"
   image_root: "~/RAE_first_exp"
-  split_manifest: "~/RAE_first_exp/documents/patient_split.json"
+  split_manifest: "~/RAE_first_exp/patient_split.json"
   resolution: 256
   use_latent: true
   use_cache: false
