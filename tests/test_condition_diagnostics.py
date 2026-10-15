@@ -2,6 +2,9 @@ import unittest
 import tempfile
 from pathlib import Path
 import ml_dtypes
+import json
+import yaml
+from unittest.mock import patch
 import jax.numpy as jnp
 import numpy as np
 from utils.condition_diagnostics import module_update_metrics
@@ -19,6 +22,24 @@ class DiagnosticTests(unittest.TestCase):
         self.assertAlmostEqual(float(metrics[prefix + 'update_norm']), 1.)
         self.assertAlmostEqual(float(metrics[prefix + 'relative_update']), .2)
         self.assertEqual(len(metrics), 4)
+
+    def test_pair_only_config(self):
+        from tools.seeg_checks import main
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / 'base.yaml'
+            out = Path(directory) / 'out.yaml'
+            base.write_text(yaml.safe_dump({'dataset': {'image_root': '~/RAE_first_exp'},
+                'train': {'lambda_drift': .1, 'forward_dict': {'gen_per_label': 1}},
+                'model': {'in_channels': 4}, 'optimizer': {'lr_schedule': {}}}))
+            with patch('sys.argv', ['checks', 'overfit-config', '--config', str(base),
+                '--output', str(out), '--pair-only', '--targets', '4', '--fixed-noise-seed', '123']):
+                main()
+            config = yaml.safe_load(out.read_text())
+            self.assertEqual(config['train']['lambda_drift'], 0.)
+            self.assertEqual(config['train']['lambda_pair'], 1.)
+            self.assertEqual(config['train']['forward_dict']['fixed_noise_seed'], 123)
+            self.assertEqual(config['dataset']['train_max_targets'], 4)
+            self.assertEqual(config['model'], {'in_channels': 4})
 
     def test_bfloat16_saved_latents(self):
         values = np.array([0., 1., -2., .125], dtype=ml_dtypes.bfloat16)

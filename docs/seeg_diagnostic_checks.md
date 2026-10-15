@@ -214,3 +214,80 @@ small relative updates can explain slow adaptation. Nonzero gradients alone do n
 prove useful condition use. The model currently scales its pooled condition signal
 by 0.02; this change records diagnostics without altering that scale, architecture,
 loss weights or encoders. Assess the measurements before changing those factors.
+
+## 8. Paired-L1-only fitting experiment (original VAE)
+
+Generate a fresh config from the exact 32-target config used previously. This
+preserves its seed, subset, model, VAE, optimizer settings and fixed donors, while
+setting lambda_pair=1 and all other objective weights to zero. Do not resume a
+mixed-objective checkpoint for this comparison.
+
+```bash
+python -m tools.seeg_checks overfit-config \
+  --config configs/gen/seeg_overfit_local.yaml \
+  --output configs/gen/seeg_pair_only_local.yaml \
+  --targets 32 --steps 5000 --pair-only
+
+python -m tools.seeg_checks audit \
+  --config configs/gen/seeg_pair_only_local.yaml \
+  --output runs/seeg_pair_only_audit.json
+
+CUDA_VISIBLE_DEVICES=0 python main.py --gen \
+  --config configs/gen/seeg_pair_only_local.yaml \
+  --workdir runs/seeg_pair_only_32
+```
+
+Feature diagnostics still run, so semantic_loss may be logged and this does not
+eliminate feature-extractor memory use. Only paired latent L1 contributes to the
+optimized objective. Use loss_pair, raw decoded samples and constant baselines
+to judge fitting; validation is still held out and need not improve during
+memorization. Conditioning update diagnostics are enabled automatically.
+
+Export the completed raw and EMA weights:
+
+```bash
+python -m tools.seeg_checks export \
+  --checkpoint-dir runs/seeg_pair_only_32/checkpoints --step 5000 \
+  --weights raw --output runs/seeg_pair_only_raw
+python -m tools.seeg_checks export \
+  --checkpoint-dir runs/seeg_pair_only_32/checkpoints --step 5000 \
+  --weights ema --output runs/seeg_pair_only_ema
+CUDA_VISIBLE_DEVICES=0 python -m tools.seeg_compare \
+  --config configs/gen/seeg_pair_only_local.yaml \
+  --audit runs/seeg_pair_only_audit.json \
+  --raw runs/seeg_pair_only_raw --ema runs/seeg_pair_only_ema \
+  --targets 4 --num-samples 4 --outdir runs/seeg_pair_only_comparison
+```
+
+If it fits substantially better than the mixed loss, investigate objective
+balance. If it still fails, isolate noise and dataset size with the following
+second experiment. This changes two factors and is an isolation check, not a
+clean attribution of which factor helped. Use fresh directories.
+
+```bash
+python -m tools.seeg_checks overfit-config \
+  --config configs/gen/seeg_overfit_local.yaml \
+  --output configs/gen/seeg_pair_only_fixed_local.yaml \
+  --targets 4 --steps 5000 --pair-only --fixed-noise-seed 123
+python -m tools.seeg_checks audit \
+  --config configs/gen/seeg_pair_only_fixed_local.yaml \
+  --output runs/seeg_pair_only_fixed_audit.json
+CUDA_VISIBLE_DEVICES=0 python main.py --gen \
+  --config configs/gen/seeg_pair_only_fixed_local.yaml \
+  --workdir runs/seeg_pair_only_fixed_4
+```
+
+This reuses one generator noise key at every step and forces batch size and
+samples-per-target to one. Validation also uses this key; donors remain fixed.
+The subset must contain at least two regions for the existing negative loader;
+if rejected, increase targets or change dataset.seed and regenerate the audit.
+Export raw/EMA as above using this run's checkpoint directory. Run seeg_compare
+with this config/audit, those exports, a fresh outdir, and `--num-samples 1`.
+It automatically passes the matching fixed noise key to inference. For manual
+sample_pair_list.py calls add `--fixed-noise-seed 123 --num-samples 1 --batch-size 1`;
+retain the audited --seed separately to reproduce donors.
+
+These experiments leave condition scale/initialization and the original VAE
+unchanged. Success with four fixed-noise targets establishes memorization only.
+If needed, separate the two factors next: 32 targets with fixed noise, and four
+with ordinary noise. Do not judge either experiment solely by semantic_loss.

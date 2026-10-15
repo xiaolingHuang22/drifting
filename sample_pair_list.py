@@ -33,11 +33,14 @@ def main():
     parser.add_argument("--outdir", required=True)
     parser.add_argument("--num-samples", type=int, default=16)
     parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--fixed-noise-seed", type=int, help="Reuse the training diagnostic noise key; requires batch size and sample count one.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint-step", type=int, default=None)
     parser.add_argument("--hsdp-dim", type=int, default=1)
     args = parser.parse_args()
 
+    if args.fixed_noise_seed is not None and (args.batch_size != 1 or args.num_samples != 1):
+        parser.error("--fixed-noise-seed requires --batch-size 1 --num-samples 1")
     run_init()
     set_global_mesh(args.hsdp_dim)
     config = load_config(args.config)
@@ -185,7 +188,7 @@ def main():
             jnp.repeat(metadata_single, batch, axis=0),
             jnp.repeat(target_coord, batch, axis=0),
             params,
-            jax.random.PRNGKey(args.seed + saved),
+            jax.random.PRNGKey(args.fixed_noise_seed if args.fixed_noise_seed is not None else args.seed + saved),
         )
         # Save unquantized HWC latents for controlled sensitivity/baseline checks.
         for index, latent in enumerate(np.asarray(jax.device_get(latents), dtype=np.float32)):

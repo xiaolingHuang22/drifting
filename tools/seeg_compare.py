@@ -41,6 +41,9 @@ def main():
     if a.targets < 1 or a.num_samples < 1:
         p.error('targets and num-samples must be positive')
     cfg = yaml.safe_load(Path(a.config).expanduser().read_text())
+    fixed_noise = cfg.get('train', {}).get('forward_dict', {}).get('fixed_noise_seed')
+    if fixed_noise is not None and a.num_samples != 1:
+        p.error('Fixed-noise experiments require --num-samples 1')
     ds = cfg['dataset']
     targets = json.loads(Path(a.audit).expanduser().read_text()).get('overfit_targets', [])
     if not targets:
@@ -67,6 +70,8 @@ def main():
                    '--target-segment', t['target_segment'], '--split', 'train',
                    '--training-condition-selection', '--seed', str(t['inference_seed']),
                    '--num-samples', str(a.num_samples), '--batch-size', '1', '--outdir', str(folder)]
+            if fixed_noise is not None:
+                cmd += ['--fixed-noise-seed', str(fixed_noise)]
             if shuffled:
                 cmd.append('--shuffle-condition-images')
             subprocess.run(cmd, check=True)

@@ -325,6 +325,7 @@ def train_step_conditional(
     lambda_tv=0.0,
     log_gen_diagnostics: bool = False,
     log_update_diagnostics: bool = False,
+    fixed_noise_seed=None,
 ):
     """Run one conditional drifting update on paired spectrogram batches.
 
@@ -333,7 +334,8 @@ def train_step_conditional(
     ``ps_not_lr``. The generator receives ``source`` by channel-wise
     concatenation with generated noise.
     """
-    rng_step = jax.random.fold_in(rng_init, state.step)
+    rng_step = (jax.random.PRNGKey(int(fixed_noise_seed)) if fixed_noise_seed is not None
+                else jax.random.fold_in(rng_init, state.step))
     source = enforce_ddp(batch["source"])
     target_ref = enforce_ddp(batch["target_ref"])
     if target_ref.ndim == 4:
@@ -646,6 +648,7 @@ def val_loss_step_conditional(
     condition_temperature=0.1,
     lambda_tv=0.0,
     log_gen_diagnostics: bool = False,
+    fixed_noise_seed=None,
 ):
     """Compute conditional held-out loss without optimizer updates."""
     _, metrics = train_step_conditional(
@@ -666,6 +669,7 @@ def val_loss_step_conditional(
         lambda_tv=lambda_tv,
         log_gen_diagnostics=log_gen_diagnostics,
         log_update_diagnostics=False,
+        fixed_noise_seed=fixed_noise_seed,
     )
     return {k: v for k, v in metrics.items() if k not in {"g_norm", "lr"}}
 
@@ -797,6 +801,7 @@ def train_gen_conditional(
             activation_kwargs=activation_kwargs,
             loss_kwargs=loss_kwargs,
             gen_per_label=gen_per_label,
+            fixed_noise_seed=forward_dict.get("fixed_noise_seed", None),
             max_grad_norm=max_grad_norm,
             lambda_drift=lambda_drift,
             lambda_pair=lambda_pair,
@@ -816,6 +821,7 @@ def train_gen_conditional(
             activation_kwargs=activation_kwargs,
             loss_kwargs=loss_kwargs,
             gen_per_label=gen_per_label,
+            fixed_noise_seed=forward_dict.get("fixed_noise_seed", None),
             lambda_drift=lambda_drift,
             lambda_pair=lambda_pair,
             lambda_condition=lambda_condition,

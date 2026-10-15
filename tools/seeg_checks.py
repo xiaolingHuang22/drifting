@@ -17,6 +17,8 @@ def main():
     config.add_argument('--output', required=True)
     config.add_argument('--targets', type=int, default=32)
     config.add_argument('--steps', type=int, default=5000)
+    config.add_argument('--pair-only', action='store_true')
+    config.add_argument('--fixed-noise-seed', type=int)
     export = sub.add_parser('export')
     export.add_argument('--checkpoint-dir', required=True)
     export.add_argument('--step', type=int, required=True)
@@ -43,6 +45,15 @@ def main():
             raise ValueError('Targets and steps must be positive.')
         cfg['dataset'].update(train_max_targets=args.targets, fixed_conditions=True)
         cfg['train'].update(total_steps=args.steps, init_from='', val_loss_batches=32)
+        if args.pair_only:
+            cfg['train'].update(lambda_drift=0.0, lambda_pair=1.0,
+                                lambda_condition=0.0, lambda_tv=0.0,
+                                log_update_diagnostics=True)
+        if args.fixed_noise_seed is not None:
+            cfg['train'].setdefault('forward_dict', {}).update(
+                fixed_noise_seed=args.fixed_noise_seed, gen_per_label=1)
+            cfg['dataset'].update(batch_size=1, eval_batch_size=1)
+            cfg['train']['train_batch_size'] = 1
         cfg['optimizer']['lr_schedule']['total_steps'] = args.steps
         output.write_text(yaml.safe_dump(cfg, sort_keys=False))
         return
