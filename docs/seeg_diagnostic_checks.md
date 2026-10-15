@@ -140,3 +140,77 @@ independent cross-patient segments supply enough information to predict exact
 target texture. Exact-target L1 can favor average predictions. If the VAE itself
 loses clinically relevant detail across representative images, then assess a
 spectrogram-specific encoder. Avoid changing all these factors together.
+
+## 6. Batch-check the completed 5000-step overfit run
+
+These commands reuse existing checkpoints and caches; no training is required.
+Use the exact overfit config and its audit from the run being investigated.
+
+```bash
+python -m tools.seeg_checks export \
+  --checkpoint-dir runs/seeg_overfit_32/checkpoints --step 5000 \
+  --weights raw --output runs/seeg_overfit_5000_raw
+
+python -m tools.seeg_checks export \
+  --checkpoint-dir runs/seeg_overfit_32/checkpoints --step 5000 \
+  --weights ema --output runs/seeg_overfit_5000_ema
+
+CUDA_VISIBLE_DEVICES=0 python -m tools.seeg_compare \
+  --config configs/gen/seeg_overfit_local.yaml \
+  --audit runs/seeg_overfit_audit.json \
+  --raw runs/seeg_overfit_5000_raw --ema runs/seeg_overfit_5000_ema \
+  --targets 4 --num-samples 4 --outdir runs/seeg_overfit_comparison
+```
+
+Adjust the audit path if you saved it elsewhere. This command launches separate
+inference processes for raw, EMA and raw-with-shuffled-images for each selected
+training target. Each uses identical noise seeds, batch size one and the audited
+fixed donor selection. It preserves coordinates/distances in the shuffled case.
+Outputs are organized by target and variant, including conditions.txt, PNGs and
+unquantized latent arrays. Existing output files at those paths are overwritten;
+use a fresh output directory for each experiment.
+
+`comparison.json` reports generated latent L1 averaged over samples against the
+exact cached target, plus zero-latent, training-subset mean-latent and median-latent
+L1 baselines. The mean/median use all audited overfit targets, not the held-out
+set. These are memorization sanity baselines; they are not independent validation
+scores. Median is included because elementwise L1 favors the median. The saved
+mean and median arrays can also be decoded with the existing VAE if needed.
+
+If generated L1 does not beat these constant baselines and outputs are smooth,
+the run has not demonstrated target-specific fitting. A small raw/shuffled latent
+difference supports weak image sensitivity on those examples; there is no universal
+threshold. Compare it with target magnitudes and repeat across targets. A larger
+difference shows sensitivity, not necessarily useful conditioning.
+
+## 7. Record conditioning gradients and actual optimizer updates
+
+In a copy of the overfit YAML, set:
+
+```yaml
+train:
+  log_update_diagnostics: true
+```
+
+Retain all the other train settings; do not replace the whole train section.
+Run in a new directory:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python main.py --gen \
+  --config configs/gen/seeg_overfit_diagnostics_local.yaml \
+  --workdir runs/seeg_overfit_diagnostics
+```
+
+Save your edited copy at the config path above first. Each metrics.jsonl record
+now includes `condition_diag/MODULE/grad_norm`, `param_norm`, `update_norm` and
+`relative_update`. Modules cover both condition convolutions, image projection,
+metadata projection, attention score and output projection. Gradients are measured
+before clipping; update norms are actual new-minus-old parameters after the
+optimizer, including weight decay. A nonzero update with zero gradients can arise
+from weight decay or optimizer momentum and does not establish useful learning.
+
+Persistent zero gradients require investigating the gradient path; persistently
+small relative updates can explain slow adaptation. Nonzero gradients alone do not
+prove useful condition use. The model currently scales its pooled condition signal
+by 0.02; this change records diagnostics without altering that scale, architecture,
+loss weights or encoders. Assess the measurements before changing those factors.

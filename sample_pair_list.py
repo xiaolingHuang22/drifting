@@ -187,6 +187,9 @@ def main():
             params,
             jax.random.PRNGKey(args.seed + saved),
         )
+        # Save unquantized HWC latents for controlled sensitivity/baseline checks.
+        for index, latent in enumerate(np.asarray(jax.device_get(latents))):
+            np.save(outdir / f"latent_{saved + index:06d}.npy", latent, allow_pickle=False)
         # Decode outside the generator JIT. This avoids capturing the large VAE
         # parameter tree in the same compiled closure and lowers peak memory.
         decoded = decode_fn(latents.transpose(0, 3, 1, 2))

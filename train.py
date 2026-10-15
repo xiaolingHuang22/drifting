@@ -612,6 +612,9 @@ def train_step_conditional(
     metric["g_norm"] = g_norm
     metric["lr"] = learning_rate_fn(state.step)
     if log_update_diagnostics:
+        from utils.condition_diagnostics import module_update_metrics
+        metric.update(module_update_metrics(state.params, grads, new_state.params))
+    if log_update_diagnostics:
         metric["grads_is_finite"] = grads_is_finite
         metric["grads_nonfinite"] = grads_nonfinite
         metric["grads_abs_max"] = grads_abs_max
