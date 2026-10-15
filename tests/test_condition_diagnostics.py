@@ -1,8 +1,11 @@
 import unittest
+import tempfile
+from pathlib import Path
+import ml_dtypes
 import jax.numpy as jnp
 import numpy as np
 from utils.condition_diagnostics import module_update_metrics
-from tools.seeg_compare import latent_scores
+from tools.seeg_compare import latent_scores, load_latent
 
 
 class DiagnosticTests(unittest.TestCase):
@@ -16,6 +19,18 @@ class DiagnosticTests(unittest.TestCase):
         self.assertAlmostEqual(float(metrics[prefix + 'update_norm']), 1.)
         self.assertAlmostEqual(float(metrics[prefix + 'relative_update']), .2)
         self.assertEqual(len(metrics), 4)
+
+    def test_bfloat16_saved_latents(self):
+        values = np.array([0., 1., -2., .125], dtype=ml_dtypes.bfloat16)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'latent.npy'
+            np.save(path, values)
+            self.assertEqual(np.load(path).dtype, np.dtype('V2'))
+            loaded = load_latent(path)
+            self.assertEqual(loaded.dtype, np.float32)
+            np.testing.assert_array_equal(loaded, [0., 1., -2., .125])
+            np.save(path, values.astype(np.float32))
+            np.testing.assert_array_equal(load_latent(path), loaded)
 
     def test_latent_baselines(self):
         target = np.ones((2, 2, 4))

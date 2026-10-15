@@ -11,6 +11,17 @@ import yaml
 from dataset.pair_list_spectrogram import latent_cache_path
 
 
+def load_latent(path):
+    value = np.load(path, allow_pickle=False)
+    if value.dtype == np.dtype('V2'):
+        # NumPy's .npy format loses the name of ml_dtypes.bfloat16 and
+        # restores its two-byte payload as void. These generated latent files
+        # were written directly from JAX bfloat16 arrays.
+        import ml_dtypes
+        value = value.view(ml_dtypes.bfloat16)
+    return value.astype(np.float32)
+
+
 def latent_scores(target, mean, median, generated):
     return {name: float(np.abs(value - target).mean()) for name, value in
             [('zero_l1', np.zeros_like(target)), ('train_mean_l1', mean),
@@ -38,7 +49,7 @@ def main():
     def target_latent(t):
         patient, channel = t['target_id'].split(',', 1)
         path = image_root / 'train' / patient / channel / t['target_segment']
-        return np.load(latent_cache_path(Path(ds['latent_root']).expanduser(), path, image_root), allow_pickle=False)
+        return load_latent(latent_cache_path(Path(ds['latent_root']).expanduser(), path, image_root))
     latents = np.stack([target_latent(t) for t in targets])
     mean, median = latents.mean(0), np.median(latents, axis=0)
     out = Path(a.outdir).expanduser().resolve()
@@ -59,7 +70,7 @@ def main():
             if shuffled:
                 cmd.append('--shuffle-condition-images')
             subprocess.run(cmd, check=True)
-            generated[variant] = np.stack([np.load(folder / f'latent_{n:06d}.npy', allow_pickle=False) for n in range(a.num_samples)])
+            generated[variant] = np.stack([load_latent(folder / f'latent_{n:06d}.npy') for n in range(a.num_samples)])
             item['variants'][variant] = latent_scores(latents[i], mean, median, generated[variant])
         difference = np.abs(generated['raw'] - generated['raw_shuffled'])
         item['raw_shuffle_latent_mae'] = float(difference.mean())
