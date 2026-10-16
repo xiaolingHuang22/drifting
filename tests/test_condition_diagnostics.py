@@ -40,6 +40,14 @@ class DiagnosticTests(unittest.TestCase):
             self.assertEqual(config['train']['forward_dict']['fixed_noise_seed'], 123)
             self.assertEqual(config['dataset']['train_max_targets'], 4)
             self.assertEqual(config['model'], {'in_channels': 4})
+            varying = Path(directory) / 'varying.yaml'
+            with patch('sys.argv', ['checks', 'overfit-config', '--config', str(out),
+                '--output', str(varying), '--pair-only', '--targets', '4', '--varying-noise']):
+                main()
+            changed = yaml.safe_load(varying.read_text())
+            self.assertNotIn('fixed_noise_seed', changed['train']['forward_dict'])
+            self.assertEqual(changed['dataset']['batch_size'], 1)
+            self.assertEqual(changed['model'], config['model'])
 
     def test_bfloat16_saved_latents(self):
         values = np.array([0., 1., -2., .125], dtype=ml_dtypes.bfloat16)

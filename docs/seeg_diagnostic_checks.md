@@ -291,3 +291,92 @@ These experiments leave condition scale/initialization and the original VAE
 unchanged. Success with four fixed-noise targets establishes memorization only.
 If needed, separate the two factors next: 32 targets with fixed noise, and four
 with ordinary noise. Do not judge either experiment solely by semantic_loss.
+
+## 9. Separate target count from noise variation
+
+The four-target fixed-noise run fits well in latent space. First confirm its
+raw decoded samples, then change one factor at a time. Keep the original VAE,
+model, paired-only loss, dataset.seed, fixed donor selection, batch size one and
+5000 steps. Use the exact fixed-four config from the successful run as the base.
+Equal steps give different presentations per target (1250 for four versus about
+156 for 32); this is an equal-compute comparison, not equal exposure per target.
+
+### A. Decode the completed fixed-four run (no retraining)
+
+```bash
+python -m tools.seeg_checks export \
+  --checkpoint-dir runs/seeg_pair_only_fixed_4/checkpoints --step 5000 \
+  --weights raw --output runs/seeg_fixed4_raw
+python -m tools.seeg_checks export \
+  --checkpoint-dir runs/seeg_pair_only_fixed_4/checkpoints --step 5000 \
+  --weights ema --output runs/seeg_fixed4_ema
+CUDA_VISIBLE_DEVICES=0 python -m tools.seeg_compare \
+  --config configs/gen/seeg_pair_only_fixed_local.yaml \
+  --audit runs/seeg_pair_only_fixed_audit.json \
+  --raw runs/seeg_fixed4_raw --ema runs/seeg_fixed4_ema \
+  --targets 4 --num-samples 1 --outdir runs/seeg_fixed4_comparison
+```
+
+The comparison automatically reuses the fixed noise seed from the config. Inspect
+raw samples and their latent L1 first; EMA can lag. Compare correct and shuffled
+conditions to establish image sensitivity. Low raw latent error with detailed
+reconstructions verifies the memorization result visually.
+
+### B. Train 32 targets with the same fixed noise
+
+```bash
+python -m tools.seeg_checks overfit-config \
+  --config configs/gen/seeg_pair_only_fixed_local.yaml \
+  --output configs/gen/seeg_pair_only_fixed32_local.yaml \
+  --targets 32 --steps 5000 --pair-only --fixed-noise-seed 123
+python -m tools.seeg_checks audit \
+  --config configs/gen/seeg_pair_only_fixed32_local.yaml \
+  --output runs/seeg_pair_only_fixed32_audit.json
+CUDA_VISIBLE_DEVICES=0 python main.py --gen \
+  --config configs/gen/seeg_pair_only_fixed32_local.yaml \
+  --workdir runs/seeg_pair_only_fixed_32
+```
+
+Use the successful run's actual fixed noise seed if it differs from 123.
+
+### C. Train four targets with varying noise
+
+```bash
+python -m tools.seeg_checks overfit-config \
+  --config configs/gen/seeg_pair_only_fixed_local.yaml \
+  --output configs/gen/seeg_pair_only_varying4_local.yaml \
+  --targets 4 --steps 5000 --pair-only --varying-noise
+python -m tools.seeg_checks audit \
+  --config configs/gen/seeg_pair_only_varying4_local.yaml \
+  --output runs/seeg_pair_only_varying4_audit.json
+CUDA_VISIBLE_DEVICES=0 python main.py --gen \
+  --config configs/gen/seeg_pair_only_varying4_local.yaml \
+  --workdir runs/seeg_pair_only_varying_4
+```
+
+`--varying-noise` explicitly removes an inherited fixed_noise_seed; simply omitting
+--fixed-noise-seed preserves an existing config value. Fixed and varying flags
+cannot be supplied together. Varying noise changes both Gaussian input noise and
+random noise-label conditioning, as in ordinary training. Target/donor selections
+remain fixed. Each run starts from scratch in its own work directory.
+
+### D. Compare the two new runs
+
+For each run, export raw and EMA at step 5000 using the same commands as A, replacing
+the checkpoint directory and output artifact names. Then use these matching sets:
+
+| Run | Config | Audit | Samples |
+| --- | --- | --- | --- |
+| Fixed 32 | seeg_pair_only_fixed32_local.yaml | seeg_pair_only_fixed32_audit.json | --num-samples 1 |
+| Varying 4 | seeg_pair_only_varying4_local.yaml | seeg_pair_only_varying4_audit.json | --num-samples 4 |
+
+Configs live in configs/gen and audits in runs, as above. Pass the matching raw/EMA
+exports to tools.seeg_compare and use separate output directories. Compare
+training loss_pair, raw decoded structure, constant baselines and correct/shuffled
+latent differences. Validation need not improve in these memorization experiments.
+
+If fixed32 succeeds but varying4 fails, noise invariance is the leading difficulty.
+If fixed32 fails but varying4 succeeds, larger-subset fitting or exposure is the
+leading difficulty. If both succeed, their combination deserves investigation.
+If both fail, the fixed-four success is a narrow memorization result. No new
+paper-derived architecture or loss is introduced in these controls.

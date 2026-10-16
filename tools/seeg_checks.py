@@ -18,7 +18,10 @@ def main():
     config.add_argument('--targets', type=int, default=32)
     config.add_argument('--steps', type=int, default=5000)
     config.add_argument('--pair-only', action='store_true')
-    config.add_argument('--fixed-noise-seed', type=int)
+    noise = config.add_mutually_exclusive_group()
+    noise.add_argument('--fixed-noise-seed', type=int)
+    noise.add_argument('--varying-noise', action='store_true',
+                       help='Remove an inherited fixed noise seed explicitly.')
     export = sub.add_parser('export')
     export.add_argument('--checkpoint-dir', required=True)
     export.add_argument('--step', type=int, required=True)
@@ -49,6 +52,8 @@ def main():
             cfg['train'].update(lambda_drift=0.0, lambda_pair=1.0,
                                 lambda_condition=0.0, lambda_tv=0.0,
                                 log_update_diagnostics=True)
+        if args.varying_noise:
+            cfg['train'].setdefault('forward_dict', {}).pop('fixed_noise_seed', None)
         if args.fixed_noise_seed is not None:
             cfg['train'].setdefault('forward_dict', {}).update(
                 fixed_noise_seed=args.fixed_noise_seed, gen_per_label=1)
