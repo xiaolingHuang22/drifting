@@ -22,6 +22,11 @@ def main():
     noise.add_argument('--fixed-noise-seed', type=int)
     noise.add_argument('--varying-noise', action='store_true',
                        help='Remove an inherited fixed noise seed explicitly.')
+    extend = sub.add_parser('extend-config')
+    extend.add_argument('--config', required=True)
+    extend.add_argument('--output', required=True)
+    extend.add_argument('--steps', type=int, default=40000)
+    extend.add_argument('--resume-min-step', type=int, default=5000)
     export = sub.add_parser('export')
     export.add_argument('--checkpoint-dir', required=True)
     export.add_argument('--step', type=int, required=True)
@@ -43,6 +48,16 @@ def main():
         return
     cfg = yaml.safe_load(Path(args.config).expanduser().read_text())
     output.parent.mkdir(parents=True, exist_ok=True)
+    if args.command == 'extend-config':
+        if args.resume_min_step <= 0 or args.steps <= args.resume_min_step:
+            raise ValueError('Extension total steps must exceed a positive resume minimum.')
+        if cfg['optimizer']['lr_schedule'].get('lr_schedule', 'const') != 'const':
+            raise ValueError('This controlled extension requires the existing constant LR schedule.')
+        cfg['train'].update(total_steps=args.steps, resume_min_step=args.resume_min_step,
+                            save_per_step=5000, keep_every=5000, keep_last=8)
+        cfg['optimizer']['lr_schedule']['total_steps'] = args.steps
+        output.write_text(yaml.safe_dump(cfg, sort_keys=False))
+        return
     if args.command == 'overfit-config':
         if args.targets <= 0 or args.steps <= 0:
             raise ValueError('Targets and steps must be positive.')

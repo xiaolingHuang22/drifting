@@ -49,6 +49,24 @@ class DiagnosticTests(unittest.TestCase):
             self.assertEqual(changed['dataset']['batch_size'], 1)
             self.assertEqual(changed['model'], config['model'])
 
+    def test_extension_preserves_experiment(self):
+        from tools.seeg_checks import main
+        with tempfile.TemporaryDirectory() as directory:
+            base, out = Path(directory) / 'base.yaml', Path(directory) / 'out.yaml'
+            original = {'dataset': {'train_max_targets': 32, 'seed': 42},
+                        'train': {'total_steps': 5000, 'lambda_pair': 1.,
+                                  'forward_dict': {'fixed_noise_seed': 123}},
+                        'optimizer': {'lr_schedule': {'lr_schedule': 'const', 'learning_rate': .0001}}}
+            base.write_text(yaml.safe_dump(original))
+            with patch('sys.argv', ['checks', 'extend-config', '--config', str(base), '--output', str(out)]):
+                main()
+            cfg = yaml.safe_load(out.read_text())
+            self.assertEqual(cfg['dataset'], original['dataset'])
+            self.assertEqual(cfg['train']['forward_dict'], original['train']['forward_dict'])
+            self.assertEqual(cfg['train']['resume_min_step'], 5000)
+            self.assertEqual(cfg['train']['total_steps'], 40000)
+            self.assertEqual(cfg['train']['keep_every'], 5000)
+
     def test_bfloat16_saved_latents(self):
         values = np.array([0., 1., -2., .125], dtype=ml_dtypes.bfloat16)
         with tempfile.TemporaryDirectory() as directory:

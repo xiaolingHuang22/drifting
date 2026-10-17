@@ -743,6 +743,7 @@ def train_gen_conditional(
     lambda_tv=0.0,
     sanity_eval_at_step1=False,
     workdir="runs",
+    resume_min_step=0,
     **unused_train_kwargs,
 ):
     """Training loop for paired conditional drifting.
@@ -779,6 +780,10 @@ def train_gen_conditional(
         ema_decay=ema_decay,
     )
     state = restore_checkpoint(state=state, workdir=workdir)
+    restored_step = int(jax.device_get(state.step))
+    if resume_min_step and (restored_step < resume_min_step or restored_step >= total_steps):
+        raise ValueError(f"Expected checkpoint step >= {resume_min_step} and < {total_steps} in {workdir}; got {restored_step}. Refusing to start the extension.")
+    log_for_0("Conditional training restored step %d; target total steps %d", restored_step, total_steps)
     if int(jax.device_get(state.step)) == 0 and init_from:
         log_for_0("Initializing conditional generator params from init_from=%s", init_from)
         state = maybe_init_state_params(
@@ -988,6 +993,7 @@ def train_gen(
     lambda_condition=0.0,  # source-vs-negative feature InfoNCE weight
     condition_temperature=0.1,  # temperature for conditional InfoNCE logits
     lambda_tv=0.0,  # generated-image total-variation weight
+    resume_min_step=0,  # require an existing conditional checkpoint for extensions
     workdir="runs",  # run root containing checkpoints/logs
 ):
     """
@@ -1031,6 +1037,7 @@ def train_gen(
             lambda_condition=lambda_condition,
             condition_temperature=condition_temperature,
             lambda_tv=lambda_tv,
+            resume_min_step=resume_min_step,
             sanity_eval_at_step1=sanity_eval_at_step1,
             workdir=workdir,
         )

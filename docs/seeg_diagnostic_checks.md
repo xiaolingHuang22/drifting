@@ -380,3 +380,74 @@ If fixed32 fails but varying4 succeeds, larger-subset fitting or exposure is the
 leading difficulty. If both succeed, their combination deserves investigation.
 If both fail, the fixed-four success is a narrow memorization result. No new
 paper-derived architecture or loss is introduced in these controls.
+
+## 10. Extend fixed32 to match small-subset training exposure
+
+Fixed32 is improving and beats constant baselines, while varying4 fits well.
+Continue the existing paired-only fixed32 run to 40000 TOTAL steps (35000 more
+from step 5000). This gives roughly 1250 presentations per target, comparable to
+four targets over 5000 steps. Keep the original VAE and all experiment settings.
+No cache rebuild or model modification is required.
+
+### A. Generate the extension config and resume
+
+```bash
+python -m tools.seeg_checks extend-config \
+  --config configs/gen/seeg_pair_only_fixed32_local.yaml \
+  --output configs/gen/seeg_pair_only_fixed32_40k_local.yaml \
+  --steps 40000 --resume-min-step 5000
+
+CUDA_VISIBLE_DEVICES=0 python main.py --gen \
+  --config configs/gen/seeg_pair_only_fixed32_40k_local.yaml \
+  --workdir runs/seeg_pair_only_fixed_32
+```
+
+Use the SAME workdir that contains the completed fixed32 `checkpoints/`, not a
+new empty directory. The training loop restores model, EMA and optimizer state
+from its latest checkpoint. It logs the restored step and refuses to start if
+it is below 5000 or already at/above 40000. It resumes the latest available step,
+not necessarily exactly 5000. Dataset iteration restarts on process launch;
+this is optimizer-state continuation, not a bit-identical replay of sample order.
+
+The helper preserves subset/donor seeds, noise key, architecture, loss weights,
+learning rate, diagnostics and validation settings. It extends the constant LR
+schedule and retains checkpoints every 5000 steps, with up to eight recent ones.
+It rejects nonconstant schedules to avoid silently changing their trajectory.
+Do not use --init-from EMA exports as a substitute for full-state resumption.
+If you want a separate run directory, copy the existing checkpoints directory
+there first and point --workdir to its parent. Keep the original config/audit
+and checkpoint copies if you need an immutable record of the earlier experiment.
+
+### B. Compare intermediate checkpoints
+
+Repeat at 10000, 20000 and 40000 (or 5000-step intervals if needed). Here is 10000:
+
+```bash
+python -m tools.seeg_checks export \
+  --checkpoint-dir runs/seeg_pair_only_fixed_32/checkpoints --step 10000 \
+  --weights raw --output runs/seeg_fixed32_10k_raw
+python -m tools.seeg_checks export \
+  --checkpoint-dir runs/seeg_pair_only_fixed_32/checkpoints --step 10000 \
+  --weights ema --output runs/seeg_fixed32_10k_ema
+CUDA_VISIBLE_DEVICES=0 python -m tools.seeg_compare \
+  --config configs/gen/seeg_pair_only_fixed32_40k_local.yaml \
+  --audit runs/seeg_pair_only_fixed32_audit.json \
+  --raw runs/seeg_fixed32_10k_raw --ema runs/seeg_fixed32_10k_ema \
+  --targets 4 --num-samples 1 --outdir runs/seeg_fixed32_10k_comparison
+```
+
+Change --step and all artifact/output names together for each checkpoint.
+Use the existing fixed32 audit: the subset and donors have not changed. Run
+inference after checkpoint saving completes; use a separate GPU if running it
+concurrently with training. To evaluate every training target, use --targets 32.
+
+### C. Decide what to do next
+
+Track loss_pair, raw decoded structure, generated latent L1 versus the same
+mean/median baselines, and correct-versus-shuffled differences. Validation stays
+patient-held-out and should be interpreted separately from memorization.
+If raw fitting continues improving, finish the exposure-matched run. If it
+plateaus without recovering structure, investigate optimization and condition
+capacity before increasing dataset size. Do not infer success from semantic_loss
+alone. A successful fixed32 fit supports a subsequent 32-target varying-noise
+experiment at comparable exposure; it does not itself establish generalization.
