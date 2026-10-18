@@ -547,3 +547,107 @@ improvement. If drifting slows fitting, quantify the tradeoff before changing it
 weight. The held-out donor coverage limitation remains in both experiments;
 these 32-target controls do not resolve the evaluation protocol or justify claims
 of patient generalization.
+
+## 13. Generalization with drifting and a training-patient reference library
+
+Drifting remains active: its feature-space force includes attraction toward
+compatible positive features and repulsion involving generated/negative features.
+Paired latent L1 remains an additional supervised term. This experiment keeps
+lambda_drift=0.1 and lambda_pair=1, the original VAE, and the existing architecture.
+
+The new `dataset.donor_protocol: train_reference` uses training patients as donors
+for ALL splits. Target patients remain in their original train/val/test split.
+The pair table's existing same-region eligibility and coordinates still apply;
+self-patient pairs are excluded. Validation/test images never enter training as
+conditions. Their target images are used for evaluation only. This differs from
+the older within_split protocol, which remains the default for old configs.
+
+```bash
+python -m tools.seeg_checks generalization-config \
+  --config configs/gen/matched32/seeg_varying32_drift_40k_local.yaml \
+  --output configs/gen/seeg_generalization_local.yaml \
+  --steps 100000 --drift-weight 0.1
+python -m tools.seeg_checks audit \
+  --config configs/gen/seeg_generalization_local.yaml \
+  --output runs/seeg_generalization_audit.json
+CUDA_VISIBLE_DEVICES=0 python main.py --gen \
+  --config configs/gen/seeg_generalization_local.yaml \
+  --workdir runs/seeg_generalization
+```
+
+Use a new workdir. This starts from scratch on ALL eligible training images,
+removes the 32-target cap and fixed noise, and resamples donor channels/segments
+during training. Validation selections are deterministic. The original pair-table,
+image, cache and split paths are inherited; inspect them first. No cache rebuild
+is needed if all referenced images already have latents. Training-reference
+coverage should be audited rather than assumed. No new pairing edges are invented.
+With approximately 30k eligible training targets and batch size one, 100k steps
+is roughly three target traversals, a pilot budget rather than a final schedule.
+Image sampling gives patients with more segments more training weight.
+
+The region-incompatible negatives still come from target records in the selected
+split. Thus validation loss uses held-out targets/negatives for scoring, not for
+optimizer updates. This protocol assumes a training-patient reference library is
+available at deployment; it is not a completely isolated held-out donor population.
+
+## 14. Held-out evaluation beyond latent L1
+
+Use validation to choose checkpoints/settings. Keep test evaluation for the final
+chosen model. The new evaluation command creates a seeded panel with up to four
+eligible target images per patient and reuses it across checkpoints. It reports
+patients with no eligible targets. Save the panel and config with the experiment.
+
+First export a completed checkpoint (example: 20000; change as appropriate):
+
+```bash
+python -m tools.seeg_checks export \
+  --checkpoint-dir runs/seeg_generalization/checkpoints --step 20000 \
+  --weights ema --output runs/seeg_generalization_20k_ema
+CUDA_VISIBLE_DEVICES=0 python -m tools.seeg_evaluate \
+  --config configs/gen/seeg_generalization_local.yaml \
+  --init-from runs/seeg_generalization_20k_ema \
+  --split val --panel runs/seeg_generalization_val_panel.json \
+  --targets-per-patient 4 --num-samples 4 --seed 42 \
+  --outdir runs/seeg_generalization_val_20k
+```
+
+For later checkpoints reuse exactly the same --panel, config, sample count and
+seed; use different artifact/output directories. Inference seed and donor choices
+are fixed per panel entry. The command runs a separate inference process per target
+so large panels are slow. Cached latents and segmented directory layout are required.
+To create a larger panel use a NEW panel path and higher --targets-per-patient;
+once created, the existing panel controls selection regardless of that argument.
+
+Run a matched shuffled-condition evaluation by repeating the same command with
+`--shuffle-condition-images` and a different --outdir. This retains metadata and
+noise seeds while replacing images from training donors. Keep generated conditions.txt
+files to audit selection. Sensitivity alone does not demonstrate improved accuracy.
+
+`evaluation.json` includes per-sample and per-target measurements, target averages,
+equal-weight patient averages and equal-weight region averages. Report patient
+averages to avoid domination by patients with many images. It measures:
+
+- Latent L1 against the cached target.
+- Image MAE, RMSE, PSNR (higher is better), and grayscale local SSIM (higher is
+  better, Gaussian sigma 1.5; cropped five-pixel border, population covariance).
+- Row/column mean-intensity profile errors and gradient error to monitor broad
+  structure and edges. These are DISPLAY-SPACE proxies, not physical SEEG band
+  power or clinical event metrics; interpreting axes requires plot metadata.
+- MAE against the target's VAE reconstruction, separately from the original image.
+- Pairwise generated-latent L1 diversity across noise draws. Larger diversity is
+  not automatically better and must be interpreted with fidelity.
+- VAE reconstruction metrics against the original, as a representation reference.
+
+Scores average all generated samples; no best-of-N target selection is performed.
+The PSNR implementation caps perfect-match values at 120 dB. SSIM is implemented
+with scipy (already required by JAX); no new model weights are downloaded. SSIM
+follows the standard local luminance/contrast/structure formulation of Wang et al.,
+"Image Quality Assessment: From Error Visibility to Structural Similarity", IEEE
+TIP 2004, https://doi.org/10.1109/TIP.2004.825095. This is an evaluation metric,
+not a change to the drifting model or training objective.
+
+After selecting a checkpoint, use --split test and a NEW test panel/output path.
+Do not compare new train_reference scores directly with old within_split scores
+as if only the model changed. Exact target segment texture may not be predictable
+from unrelated patient recordings; interpret reconstruction error alongside
+structure, condition controls, and eventually clinically relevant signal metrics.

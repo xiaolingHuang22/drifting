@@ -90,6 +90,47 @@ class DiagnosticTests(unittest.TestCase):
             self.assertEqual(pair['dataset']['train_max_targets'], 32)
             self.assertEqual(pair['train']['total_steps'], 40000)
 
+    def test_training_reference_donors_and_image_metrics(self):
+        from dataset.pair_list_spectrogram import donor_patients_for_split, eligible_conditions, PairListSpectrogramDataset
+        from tools.seeg_evaluate import image_metrics
+        manifest = {'train': ['train1', 'train2'], 'val': ['val1'], 'test': ['test1']}
+        allowed = donor_patients_for_split(manifest, 'val', 'train_reference')
+        self.assertEqual(allowed, {'train1', 'train2'})
+        records = []
+        for i, region in enumerate(['R1', 'R2']):
+            records.append({'target_id': f'val1,C{i}', 'target_patient': 'val1', 'region': region,
+                'conditions': [{'patient': pat} for pat in ['train1', 'val1', 'test1']]})
+        ds = PairListSpectrogramDataset(records, ['val1'], donor_patients=allowed)
+        self.assertEqual(len(ds), 2)
+        self.assertTrue(all(c['patient']=='train1' for r in ds.records for c in r['conditions']))
+        self.assertEqual(eligible_conditions({'target_patient':'train1', 'conditions':[{'patient':'train1'}]}, allowed), [])
+        x = np.zeros((32,32,3), dtype=np.float32)
+        perfect = image_metrics(x, x)
+        self.assertAlmostEqual(perfect['ssim_gray'], 1.)
+        self.assertEqual(perfect['image_mae'], 0.)
+        worse = image_metrics(x, np.ones_like(x))
+        self.assertEqual(worse['image_rmse'], 1.)
+        self.assertLess(worse['ssim_gray'], perfect['ssim_gray'])
+
+    def test_generalization_config_keeps_drifting(self):
+        from tools.seeg_checks import main
+        with tempfile.TemporaryDirectory() as directory:
+            base, out = Path(directory)/'base.yaml', Path(directory)/'out.yaml'
+            base.write_text(yaml.safe_dump({'dataset': {'seed': 42, 'train_max_targets': 32},
+                'train': {'forward_dict': {'fixed_noise_seed': 123}, 'resume_min_step': 5000},
+                'model': {'in_channels': 4}, 'optimizer': {'lr_schedule': {}}}))
+            with patch('sys.argv', ['checks', 'generalization-config', '--config', str(base), '--output', str(out)]):
+                main()
+            cfg = yaml.safe_load(out.read_text())
+            self.assertEqual(cfg['dataset']['donor_protocol'], 'train_reference')
+            self.assertIsNone(cfg['dataset']['train_max_targets'])
+            self.assertFalse(cfg['dataset']['fixed_conditions'])
+            self.assertEqual(cfg['train']['lambda_drift'], .1)
+            self.assertEqual(cfg['train']['lambda_pair'], 1.)
+            self.assertNotIn('fixed_noise_seed', cfg['train']['forward_dict'])
+            self.assertEqual(cfg['train']['resume_min_step'], 0)
+            self.assertEqual(cfg['model'], {'in_channels': 4})
+
     def test_bfloat16_saved_latents(self):
         values = np.array([0., 1., -2., .125], dtype=ml_dtypes.bfloat16)
         with tempfile.TemporaryDirectory() as directory:

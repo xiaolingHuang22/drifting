@@ -29,6 +29,11 @@ def main():
     matched.add_argument('--output', required=True, help='Directory for paired-only and mixed configs.')
     matched.add_argument('--steps', type=int, default=40000)
     matched.add_argument('--drift-weight', type=float, default=0.1)
+    general = sub.add_parser('generalization-config')
+    general.add_argument('--config', required=True)
+    general.add_argument('--output', required=True)
+    general.add_argument('--steps', type=int, default=100000)
+    general.add_argument('--drift-weight', type=float, default=0.1)
     extend = sub.add_parser('extend-config')
     extend.add_argument('--config', required=True)
     extend.add_argument('--output', required=True)
@@ -55,6 +60,20 @@ def main():
         return
     cfg = yaml.safe_load(Path(args.config).expanduser().read_text())
     output.parent.mkdir(parents=True, exist_ok=True)
+    if args.command == 'generalization-config':
+        if args.steps <= 0 or not math.isfinite(args.drift_weight) or args.drift_weight <= 0:
+            raise ValueError('Steps and drift weight must be positive and finite.')
+        cfg['dataset'].update(donor_protocol='train_reference', train_max_targets=None,
+                              fixed_conditions=False)
+        cfg['train'].update(total_steps=args.steps, init_from='', resume_min_step=0,
+                            lambda_drift=args.drift_weight, lambda_pair=1.,
+                            lambda_condition=0., lambda_tv=0., val_loss_batches=64,
+                            save_per_step=5000, keep_every=5000, keep_last=8,
+                            log_update_diagnostics=True)
+        cfg['train'].setdefault('forward_dict', {}).pop('fixed_noise_seed', None)
+        cfg['optimizer']['lr_schedule']['total_steps'] = args.steps
+        output.write_text(yaml.safe_dump(cfg, sort_keys=False))
+        return
     if args.command == 'matched-configs':
         if args.steps <= 0 or not math.isfinite(args.drift_weight) or args.drift_weight <= 0:
             raise ValueError('Steps and drift weight must be positive and finite.')
@@ -112,7 +131,7 @@ def main():
         cfg['optimizer']['lr_schedule']['total_steps'] = args.steps
         output.write_text(yaml.safe_dump(cfg, sort_keys=False))
         return
-    from dataset.pair_list_spectrogram import build_pair_list_records, load_patient_split
+    from dataset.pair_list_spectrogram import build_pair_list_records, load_patient_split, donor_patients_for_split, eligible_conditions
     ds = cfg['dataset']
     root = Path(ds['image_root']).expanduser()
     segmented = any((root / s).is_dir() for s in ('train', 'val', 'test'))
@@ -121,13 +140,14 @@ def main():
     result = {}
     for split in ('train', 'val', 'test'):
         allowed = set(manifest[split])
+        donor_allowed = donor_patients_for_split(manifest, split, ds.get('donor_protocol', 'within_split'))
         targets = {}
         for r in records:
             if r['target_patient'] not in allowed:
                 continue
             key = r.get('channel_id', r['target_id'])
             if key not in targets:
-                donors = [c for c in r['conditions'] if c['patient'] in allowed]
+                donors = eligible_conditions(r, donor_allowed)
                 targets[key] = {'target_segments': 0, 'eligible_channels': len(donors),
                                 'donor_patients': sorted({c['patient'] for c in donors}),
                                 'selected_slots': min(len(donors), ds.get('max_conditions', 8))}
@@ -136,7 +156,7 @@ def main():
         for t in targets.values():
             n = str(t['eligible_channels'])
             histogram[n] = histogram.get(n, 0) + 1
-        result[split] = {'patients': len(allowed), 'target_channels': len(targets),
+        result[split] = {'donor_protocol': ds.get('donor_protocol', 'within_split'), 'patients': len(allowed), 'target_channels': len(targets),
                          'retained_segments': sum(t['target_segments'] for t in targets.values() if t['eligible_channels']),
                          'eligible_channel_histogram': histogram, 'targets': targets}
     if ds.get('train_max_targets'):
@@ -144,7 +164,8 @@ def main():
         import random
         subset = PairListSpectrogramDataset(records, manifest['train'],
                     max_targets=ds['train_max_targets'], seed=ds.get('seed', 42),
-                    fixed_conditions=True)
+                    fixed_conditions=True,
+                    donor_patients=donor_patients_for_split(manifest, 'train', ds.get('donor_protocol', 'within_split')))
         result['overfit_targets'] = [
             {'target_id': r.get('channel_id', r['target_id']),
              'target_segment': Path(r['target_path']).name,

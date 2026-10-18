@@ -12,7 +12,7 @@ import numpy as np
 from PIL import Image
 from torchvision import transforms
 
-from dataset.pair_list_spectrogram import build_pair_list_records, latent_cache_path, load_patient_split, select_conditions
+from dataset.pair_list_spectrogram import build_pair_list_records, latent_cache_path, load_patient_split, select_conditions, donor_patients_for_split, eligible_conditions
 from dataset.vae import vae_enc_decode
 from sample_only import _to_uint8_images
 from utils.env import HF_ROOT
@@ -59,20 +59,21 @@ def main():
     records = build_pair_list_records(config.dataset.table_path, image_root,
                                       config.dataset.split_manifest if segmented else None)
     allowed = set(manifest[args.split])
+    donors = donor_patients_for_split(manifest, args.split, config.dataset.get("donor_protocol", "within_split"))
     matches = [r for r in records if r["target_patient"] in allowed
                and (r["target_id"] == args.target_id or r.get("channel_id") == args.target_id)
                and (not args.target_segment or Path(r["target_path"]).name == args.target_segment)]
     if len(matches) != 1:
         raise ValueError(f"Expected one target in {args.split}, found {len(matches)}. Specify --target-segment for a multi-segment channel.")
     record = dict(matches[0])
-    record["conditions"] = [c for c in record["conditions"] if c["patient"] in allowed]
+    record["conditions"] = eligible_conditions(record, donors)
     if not record["conditions"]:
         raise ValueError("No donor channels remain in the requested patient split.")
     max_conditions = int(config.dataset.get("max_conditions", 8))
     selected = select_conditions(record, max_conditions, random.Random(args.seed), training=args.training_condition_selection)
     if args.shuffle_condition_images:
-        pool = sorted({path for r in records if r["target_patient"] in allowed
-                       for c in r["conditions"] if c["patient"] in allowed
+        pool = sorted({path for r in records
+                       for c in r["conditions"] if c["patient"] in donors and c["patient"] != record["target_patient"]
                        for path in c.get("paths", [c["path"]])}
                       - {r["target_path"] for r in matches})
         if not pool:

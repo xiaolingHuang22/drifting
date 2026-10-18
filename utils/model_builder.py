@@ -201,6 +201,7 @@ def build_model_dict(config, model_class, *, workdir: str = "runs"):
             image_root=image_root,
             train_max_targets=config.dataset.get("train_max_targets", None),
             fixed_conditions=bool(config.dataset.get("fixed_conditions", False)),
+            donor_protocol=config.dataset.get("donor_protocol", "within_split"),
             split_manifest=split_manifest,
             resolution=resolution,
             max_conditions=int(config.dataset.get("max_conditions", 8)),

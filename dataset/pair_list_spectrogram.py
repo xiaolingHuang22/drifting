@@ -56,6 +56,17 @@ def load_patient_split(path):
     return manifest
 
 
+def donor_patients_for_split(manifest, split, protocol="within_split"):
+    if protocol not in ("within_split", "train_reference"):
+        raise ValueError(f"Unknown donor protocol: {protocol}")
+    return set(manifest["train"] if protocol == "train_reference" else manifest[split])
+
+
+def eligible_conditions(record, donor_patients):
+    return [c for c in record["conditions"] if c["patient"] in donor_patients
+            and c["patient"] != record["target_patient"]]
+
+
 def image_paths(root, patient, channel, manifest=None):
     if manifest is not None:
         split = next((s for s in ("train", "val", "test") if patient in manifest[s]), None)
@@ -210,6 +221,7 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
         records,
         split_patients,
         *,
+        donor_patients=None,
         max_conditions=8,
         k_neg=4,
         resolution=256,
@@ -230,11 +242,12 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
             Path(latent_root).expanduser().resolve() if latent_root else None
         )
         allowed = set(split_patients)
+        donors = allowed if donor_patients is None else set(donor_patients)
         self.records = []
         for record in records:
             if record["target_patient"] not in allowed:
                 continue
-            filtered = [c for c in record["conditions"] if c["patient"] in allowed]
+            filtered = eligible_conditions(record, donors)
             if filtered:
                 item = dict(record)
                 item["conditions"] = filtered
@@ -321,12 +334,13 @@ def create_pair_list_spectrogram_split(
     max_conditions=8, k_neg=4, use_natural_vae=True, latent_root=None,
     coordinate_scale=100.0, seed=42,
     num_workers=0, prefetch_factor=2, pin_memory=False,
-    train_max_targets=None, fixed_conditions=False,
+    train_max_targets=None, fixed_conditions=False, donor_protocol="within_split",
 ):
     records = build_pair_list_records(table_path, image_root, split_manifest if any((Path(image_root).expanduser() / s).is_dir() for s in ("train", "val", "test")) else None)
     manifest = load_patient_split(split_manifest)
     ds = PairListSpectrogramDataset(
         records, manifest[split], max_conditions=max_conditions, k_neg=k_neg,
+        donor_patients=donor_patients_for_split(manifest, split, donor_protocol),
         resolution=resolution, latent_root=latent_root,
         image_root=image_root,
         max_targets=train_max_targets if split == "train" else None,
