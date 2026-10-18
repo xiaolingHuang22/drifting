@@ -67,6 +67,29 @@ class DiagnosticTests(unittest.TestCase):
             self.assertEqual(cfg['train']['total_steps'], 40000)
             self.assertEqual(cfg['train']['keep_every'], 5000)
 
+    def test_matched_configs_only_differ_in_drift_weight(self):
+        from tools.seeg_checks import main
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / 'base.yaml'
+            output = Path(directory) / 'configs'
+            base.write_text(yaml.safe_dump({'dataset': {'seed': 42},
+                'train': {'seed': 42, 'resume_min_step': 5000,
+                          'forward_dict': {'fixed_noise_seed': 123}},
+                'model': {'in_channels': 4},
+                'optimizer': {'lr_schedule': {'learning_rate': .0001}}}))
+            with patch('sys.argv', ['checks', 'matched-configs', '--config', str(base), '--output', str(output)]):
+                main()
+            pair = yaml.safe_load((output / 'seeg_varying32_pair_40k_local.yaml').read_text())
+            drift = yaml.safe_load((output / 'seeg_varying32_drift_40k_local.yaml').read_text())
+            self.assertEqual(pair['train']['lambda_drift'], 0.)
+            self.assertEqual(drift['train']['lambda_drift'], .1)
+            drift['train']['lambda_drift'] = 0.
+            self.assertEqual(pair, drift)
+            self.assertEqual(pair['train']['resume_min_step'], 0)
+            self.assertNotIn('fixed_noise_seed', pair['train']['forward_dict'])
+            self.assertEqual(pair['dataset']['train_max_targets'], 32)
+            self.assertEqual(pair['train']['total_steps'], 40000)
+
     def test_bfloat16_saved_latents(self):
         values = np.array([0., 1., -2., .125], dtype=ml_dtypes.bfloat16)
         with tempfile.TemporaryDirectory() as directory:

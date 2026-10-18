@@ -451,3 +451,99 @@ plateaus without recovering structure, investigate optimization and condition
 capacity before increasing dataset size. Do not infer success from semantic_loss
 alone. A successful fixed32 fit supports a subsequent 32-target varying-noise
 experiment at comparable exposure; it does not itself establish generalization.
+
+## 11. Train varying-noise 32 targets at matched exposure
+
+Generate BOTH controlled experiment configs from the exact fixed32 config used
+for the 40k run. This retains the subset seed, donor choices, model, original VAE,
+learning rate and optimizer settings. It removes the fixed noise key, clears
+inherited resume requirements, uses batch size one and 40000 total steps, and
+enables conditioning diagnostics. The two generated configs differ only in
+lambda_drift (0 versus 0.1). No new paper-derived method is introduced.
+
+```bash
+python -m tools.seeg_checks matched-configs \
+  --config configs/gen/seeg_pair_only_fixed32_40k_local.yaml \
+  --output configs/gen/matched32 --steps 40000 --drift-weight 0.1
+
+python -m tools.seeg_checks audit \
+  --config configs/gen/matched32/seeg_varying32_pair_40k_local.yaml \
+  --output runs/seeg_varying32_pair_audit.json
+
+CUDA_VISIBLE_DEVICES=0 python main.py --gen \
+  --config configs/gen/matched32/seeg_varying32_pair_40k_local.yaml \
+  --workdir runs/seeg_varying32_pair_40k
+```
+
+Use a NEW EMPTY workdir for this run, not the fixed32 directory. This is a
+from-scratch comparison: initialization and dataset seeds match the other config.
+The helper refuses to overwrite existing configs. Neither experiment initializes
+from fixed32 weights. Subsequent invocations in the same workdir resume its own
+latest checkpoint normally. Varying noise changes both spatial Gaussian noise and
+noise-label conditioning. Donor selections remain fixed.
+
+At 10k, 20k and 40k, export raw/EMA and compare. Here is the final checkpoint:
+
+```bash
+python -m tools.seeg_checks export \
+  --checkpoint-dir runs/seeg_varying32_pair_40k/checkpoints --step 40000 \
+  --weights raw --output runs/seeg_varying32_pair_40k_raw
+python -m tools.seeg_checks export \
+  --checkpoint-dir runs/seeg_varying32_pair_40k/checkpoints --step 40000 \
+  --weights ema --output runs/seeg_varying32_pair_40k_ema
+CUDA_VISIBLE_DEVICES=0 python -m tools.seeg_compare \
+  --config configs/gen/matched32/seeg_varying32_pair_40k_local.yaml \
+  --audit runs/seeg_varying32_pair_audit.json \
+  --raw runs/seeg_varying32_pair_40k_raw --ema runs/seeg_varying32_pair_40k_ema \
+  --targets 32 --num-samples 4 --outdir runs/seeg_varying32_pair_40k_comparison
+```
+
+Use unique artifact/output names for intermediate steps. Four samples test more
+than one noise draw but are not a full diversity evaluation. Compare training L1,
+per-target raw/EMA errors, structures and condition sensitivity against fixed32.
+If varying32 fits less well, noise invariance remains an optimization difficulty.
+
+## 12. Reintroduce drifting with a matched from-scratch control
+
+Use the second config generated in Section 11. It sets lambda_drift=0.1,
+lambda_pair=1, lambda_condition=0 and lambda_tv=0; all other settings match the
+varying32 paired-only config. The 0.1 weight reproduces the earlier mixed objective
+and is a controlled starting point, not an established optimum. It uses the
+existing compatibility-masked drifting implementation and original VAE.
+
+```bash
+python -m tools.seeg_checks audit \
+  --config configs/gen/matched32/seeg_varying32_drift_40k_local.yaml \
+  --output runs/seeg_varying32_drift_audit.json
+CUDA_VISIBLE_DEVICES=0 python main.py --gen \
+  --config configs/gen/matched32/seeg_varying32_drift_40k_local.yaml \
+  --workdir runs/seeg_varying32_drift_40k
+```
+
+Use a separate NEW EMPTY workdir. Do not warm-start this controlled comparison
+from paired-only weights: that would mix objective and training-history changes.
+You may run it after Section 11 or independently on another GPU. Audit target
+lists and donor paths should match between the two runs.
+
+```bash
+python -m tools.seeg_checks export \
+  --checkpoint-dir runs/seeg_varying32_drift_40k/checkpoints --step 40000 \
+  --weights raw --output runs/seeg_varying32_drift_40k_raw
+python -m tools.seeg_checks export \
+  --checkpoint-dir runs/seeg_varying32_drift_40k/checkpoints --step 40000 \
+  --weights ema --output runs/seeg_varying32_drift_40k_ema
+CUDA_VISIBLE_DEVICES=0 python -m tools.seeg_compare \
+  --config configs/gen/matched32/seeg_varying32_drift_40k_local.yaml \
+  --audit runs/seeg_varying32_drift_audit.json \
+  --raw runs/seeg_varying32_drift_40k_raw --ema runs/seeg_varying32_drift_40k_ema \
+  --targets 32 --num-samples 4 --outdir runs/seeg_varying32_drift_40k_comparison
+```
+
+Compare these runs at equal steps using loss_pair (NOT total loss, whose terms
+differ), raw/EMA samples, baseline errors, shuffled-condition sensitivity and
+validation separately. Normalized drift loss near one is not a progress measure.
+Better training texture or memorization alone does not establish held-out
+improvement. If drifting slows fitting, quantify the tradeoff before changing its
+weight. The held-out donor coverage limitation remains in both experiments;
+these 32-target controls do not resolve the evaluation protocol or justify claims
+of patient generalization.

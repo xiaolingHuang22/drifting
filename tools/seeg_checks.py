@@ -1,5 +1,7 @@
 """Audit donor coverage, prepare a fixed-data experiment, or export checkpoint weights."""
 import argparse
+import copy
+import math
 import json
 from pathlib import Path
 
@@ -22,6 +24,11 @@ def main():
     noise.add_argument('--fixed-noise-seed', type=int)
     noise.add_argument('--varying-noise', action='store_true',
                        help='Remove an inherited fixed noise seed explicitly.')
+    matched = sub.add_parser('matched-configs')
+    matched.add_argument('--config', required=True)
+    matched.add_argument('--output', required=True, help='Directory for paired-only and mixed configs.')
+    matched.add_argument('--steps', type=int, default=40000)
+    matched.add_argument('--drift-weight', type=float, default=0.1)
     extend = sub.add_parser('extend-config')
     extend.add_argument('--config', required=True)
     extend.add_argument('--output', required=True)
@@ -48,6 +55,34 @@ def main():
         return
     cfg = yaml.safe_load(Path(args.config).expanduser().read_text())
     output.parent.mkdir(parents=True, exist_ok=True)
+    if args.command == 'matched-configs':
+        if args.steps <= 0 or not math.isfinite(args.drift_weight) or args.drift_weight <= 0:
+            raise ValueError('Steps and drift weight must be positive and finite.')
+        cfg['dataset'].update(train_max_targets=32, fixed_conditions=True,
+                              batch_size=1, eval_batch_size=1)
+        cfg['train'].update(total_steps=args.steps, init_from='', resume_min_step=0,
+                            train_batch_size=1, val_loss_batches=32,
+                            lambda_pair=1.0, lambda_condition=0.0, lambda_tv=0.0,
+                            log_update_diagnostics=True, save_per_step=5000,
+                            keep_every=5000, keep_last=8)
+        cfg['train'].setdefault('forward_dict', {}).pop('fixed_noise_seed', None)
+        cfg['train']['forward_dict']['gen_per_label'] = 1
+        cfg['optimizer']['lr_schedule']['total_steps'] = args.steps
+        output.mkdir(parents=True, exist_ok=True)
+        variants = [('varying32_pair', 0.0), ('varying32_drift', args.drift_weight)]
+        for name, _ in variants:
+            path = output / f'seeg_{name}_40k_local.yaml'
+            if path.exists():
+                raise FileExistsError(f'Refusing to overwrite experiment config: {path}')
+        for name, weight in variants:
+            variant = copy.deepcopy(cfg)
+            variant['train']['lambda_drift'] = weight
+            path = output / f'seeg_{name}_40k_local.yaml'
+            if path.exists():
+                raise FileExistsError(f'Refusing to overwrite experiment config: {path}')
+            path.write_text(yaml.safe_dump(variant, sort_keys=False))
+            print(path)
+        return
     if args.command == 'extend-config':
         if args.resume_min_step <= 0 or args.steps <= args.resume_min_step:
             raise ValueError('Extension total steps must exceed a positive resume minimum.')
@@ -62,7 +97,7 @@ def main():
         if args.targets <= 0 or args.steps <= 0:
             raise ValueError('Targets and steps must be positive.')
         cfg['dataset'].update(train_max_targets=args.targets, fixed_conditions=True)
-        cfg['train'].update(total_steps=args.steps, init_from='', val_loss_batches=32)
+        cfg['train'].update(total_steps=args.steps, init_from='', resume_min_step=0, val_loss_batches=32)
         if args.pair_only:
             cfg['train'].update(lambda_drift=0.0, lambda_pair=1.0,
                                 lambda_condition=0.0, lambda_tv=0.0,
