@@ -651,3 +651,164 @@ Do not compare new train_reference scores directly with old within_split scores
 as if only the model changed. Exact target segment texture may not be predictable
 from unrelated patient recordings; interpret reconstruction error alongside
 structure, condition controls, and eventually clinically relevant signal metrics.
+
+## 15. Diagnose the stalled full-data run on training and validation panels
+
+The 100k run plateaued on BOTH training and validation latent L1. Do not extend it
+unchanged. The successful small runs used repeated targets and fixed donor images;
+the full run changed target count, visits per target and donor variability together.
+First evaluate TRAINING targets from the existing checkpoint, not just validation.
+The evaluator now supports --split train and respects the config's training subset.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m tools.seeg_evaluate \
+  --config configs/gen/seeg_generalization_local.yaml \
+  --init-from runs/seeg_generalization_100k_ema \
+  --split train --panel runs/seeg_generalization_train_panel.json \
+  --targets-per-patient 1 --num-samples 4 --seed 42 \
+  --outdir runs/seeg_generalization_train_100k
+```
+
+For the same raw checkpoint, export --weights raw from checkpoints at step 100000
+and repeat with the SAME panel in another outdir. Repeat on the existing validation
+panel with correct and --shuffle-condition-images inputs. Keep test untouched.
+These require no retraining or cache rebuild. Panels with one training example per
+eligible patient give a quick fitting check, not exhaustive training-set performance.
+
+Evaluation now also reports zero-latent, TRAINING-mean-latent and selected-donor-mean
+latent L1. The training mean is streamed over eligible training target latents only,
+respecting any target cap; no validation/test targets enter this baseline. It can
+read many .npy files and take time, but does not materialize the full cache in RAM.
+The donor baseline averages the actual selected images saved in conditions.txt,
+so it changes under shuffled conditions. Neither latent mean is a physical mixture
+of signals or a guaranteed plausible spectrogram. Baselines are latent-space checks;
+existing image metrics remain unchanged. All baseline values appear in per-sample,
+target/patient/region summaries in evaluation.json.
+
+For fixed-condition training subsets, the evaluator reproduces the audited view-zero
+training donors with a separate condition seed. Generator noise seeds stay fixed
+per evaluation panel. For resampled training conditions, it selects a reproducible
+training-style donor draw. Held-out evaluation continues selecting nearest eligible
+donor channels and a seeded segment. Keep this difference in mind when comparing
+training to validation. Panels are not the same as minibatches in training logs.
+
+## 16. Isolate donor resampling before another full-data run
+
+Generate three matched, drift-active 32-target experiments from the stalled full
+config. Keep the original VAE, architecture, learning rate, drift weight and paired
+L1. Donors are training patients and generator noise varies normally in ALL three.
+
+```bash
+python -m tools.seeg_recovery \
+  --config configs/gen/seeg_generalization_local.yaml \
+  --output configs/gen/recovery32 --stage conditions --steps 40000 --views 4
+```
+
+The new condition_sampling setting controls ONLY training donor selection:
+
+| Config | Donor inputs on repeated visits |
+| --- | --- |
+| seeg_recovery32_fixed.yaml | One reproducible condition set per target |
+| seeg_recovery32_resample.yaml | Fresh random donor channels/segments each visit |
+| seeg_recovery32_bank.yaml | Randomly choose among four reproducible sets per target |
+
+All variants fix negative sampling per target to prevent it confounding the donor
+comparison; they differ ONLY in condition_sampling. Bank view zero reproduces the
+fixed donor set. Other views can overlap or duplicate when donors have few images;
+"four" is a cap on seeded views, not a guarantee of four distinct sets. This bounded
+augmentation is a proposed experiment, not an established improvement or a new
+paper-derived algorithm. Training views never include validation/test patients.
+
+Audit each config (example for fixed):
+
+```bash
+python -m tools.seeg_checks audit \
+  --config configs/gen/recovery32/seeg_recovery32_fixed.yaml \
+  --output runs/seeg_recovery32_fixed_audit.json
+CUDA_VISIBLE_DEVICES=0 python main.py --gen \
+  --config configs/gen/recovery32/seeg_recovery32_fixed.yaml \
+  --workdir runs/seeg_recovery32_fixed
+```
+
+Repeat by replacing every "fixed" in those paths with "resample", then "bank".
+Use NEW EMPTY workdirs. Start with fixed/resample; bank is useful if refreshed donors
+hurt fitting. Re-running old experiments exactly is not intended: these new controls
+use training-reference donors and controlled negatives, with identical settings
+between the three new variants. Audit overfit_targets lists view-zero conditions;
+it does not claim those are every random draw or every bank view.
+
+At 10k and 40k, export raw/EMA using Section 12's export pattern with the matching
+checkpoint directory. Use tools.seeg_compare with the matching config and audit,
+--targets 32 --num-samples 4, and a distinct output directory. It evaluates view-zero
+donors on the training targets, including for the bank model. Use tools.seeg_evaluate
+on training/val panels as in Sections 14-15 for baseline and image measurements.
+Use the SAME saved validation panel across all variants. Banks must also be checked
+on held-out targets with ordinary donor selection; view-zero memorization alone
+is not success at generalization.
+
+The new configs use a seeded patient-balanced validation cap of 64 eligible images,
+cache the same validation batches for every evaluation, and reuse a validation-only
+noise seed. They report val/* using EMA weights. Training loss remains raw-weight
+stochastic minibatch loss, so train and val curves have different estimators.
+These validation settings do NOT alter training noise, images or gradients. Old
+configs retain their original behavior unless the new fields are enabled.
+
+Validation panel/noise controls live in train.forward_dict:
+`stable_validation: true`, `validation_noise_seed: 2026`, `validation_use_ema: true`.
+The validation loss frequency is 1000 steps. Dataset.val_max_targets=64 provides
+patient-balanced cap selection; eligible patients missing pair-table edges remain
+missing and should be reported by the audit. Stable validation makes comparisons
+less noisy, not necessarily lower. Training resampling and bank draw order remain
+stochastic and are not bit-identically replayed on resume.
+
+The automatic loss_curve.png now plots paired latent L1 when available. The
+separate semantic_loss_curve.png preserves the detached semantic monitor. This
+plotting change applies to all runs; historical plots can be regenerated by
+calling WandbLogger.save_loss_plot on their metrics directory. Do not optimize
+for visual smoothness of curves or treat normalized drift_loss near one as failure.
+
+Interpret the control before scaling:
+
+- Fixed fits, resample fails: donor variability is implicated; test bank as a bridge.
+- Fixed and resample both fit: the full-run failure is more likely scale/exposure or
+  heterogeneous data, not resampling alone.
+- Bank fits training but not validation: it is another memorization result; do not
+  promote it based on training losses alone.
+- Fixed no longer fits: stop and inspect subset, conditioning/negative controls and
+  data before launching a larger run.
+
+## 17. Scale gradually with patient-balanced training subsets
+
+Only after Section 16 shows learning, generate a 256-target pilot, rather than
+jumping directly to all ~30k images. This gives eligible training patients roughly
+equal target representation in the subset; it does not change or combine patient
+splits. Full data remain available as the reference donor library.
+
+```bash
+python -m tools.seeg_recovery \
+  --config configs/gen/seeg_generalization_local.yaml \
+  --output configs/gen/recovery256 --stage scale --steps 100000 --views 4
+python -m tools.seeg_checks audit \
+  --config configs/gen/recovery256/seeg_recovery256_bank.yaml \
+  --output runs/seeg_recovery256_bank_audit.json
+CUDA_VISIBLE_DEVICES=0 python main.py --gen \
+  --config configs/gen/recovery256/seeg_recovery256_bank.yaml \
+  --workdir runs/seeg_recovery256_bank
+```
+
+A matched seeg_recovery256_resample.yaml is generated too. Run it separately if
+Section 16 supports that comparison; do not automatically spend two full runs.
+Both keep drifting active. No new encoder, condition scale, feature architecture,
+LR schedule or objective weight change is included, so the candidate sampling
+improvement can be evaluated on its own. Use a fresh workdir for each run.
+
+100k steps give about 390 presentations per target here, still below the ~1250
+in fixed32 at 40k. Compare checkpoints at 10k/40k/100k. If larger-subset fitting
+is merely slower, account for exposure before claiming a capacity failure. Evaluate
+all 256 training targets when practical (tools.seeg_compare --targets 256) and the
+same validation panel. Choose settings on patient-averaged validation metrics,
+condition-shuffling controls and structure, not a best-looking target. If training
+improves while validation does not, prioritize predictive information in donors,
+recording-state metadata and task definition before more memorization training.
+Arbitrary cross-patient segments may not predict an exact target's fine texture;
+no sampling change guarantees the validation L1 will approach reconstruction error.

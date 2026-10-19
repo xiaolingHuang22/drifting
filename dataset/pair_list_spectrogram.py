@@ -67,6 +67,35 @@ def eligible_conditions(record, donor_patients):
             and c["patient"] != record["target_patient"]]
 
 
+def select_target_records(records, count, seed=42, patient_balanced=False):
+    """Seeded cap; optionally give eligible patients equal subset representation."""
+    if count is None:
+        return list(records)
+    if int(count) <= 0:
+        raise ValueError("Target cap must be positive.")
+    rng = random.Random(seed)
+    if not patient_balanced:
+        return rng.sample(records, min(int(count), len(records)))
+    pools = defaultdict(list)
+    for record in records:
+        pools[record["target_patient"]].append(record)
+    patients = sorted(pools)
+    rng.shuffle(patients)
+    for patient in patients:
+        rng.shuffle(pools[patient])
+    selected = []
+    while len(selected) < min(int(count), len(records)):
+        for patient in patients:
+            if pools[patient] and len(selected) < int(count):
+                selected.append(pools[patient].pop())
+    return selected
+
+
+def condition_view_rng(seed, index, target_id, view=0):
+    # View zero matches the existing fixed-condition diagnostic exactly.
+    return random.Random(seed + index if view == 0 else f"{seed}:{target_id}:view:{view}")
+
+
 def image_paths(root, patient, channel, manifest=None):
     if manifest is not None:
         split = next((s for s in ("train", "val", "test") if patient in manifest[s]), None)
@@ -230,8 +259,19 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
         image_root=None,
         max_targets=None,
         fixed_conditions=False,
+        condition_sampling=None,
+        condition_views=4,
+        fixed_negatives=False,
+        patient_balanced=False,
         seed=42,
     ):
+        if condition_sampling not in (None, "fixed", "resample", "bank"):
+            raise ValueError(f"Unknown condition sampling: {condition_sampling}")
+        if int(condition_views) < 1:
+            raise ValueError("condition_views must be positive")
+        self.condition_sampling = condition_sampling
+        self.condition_views = int(condition_views)
+        self.fixed_negatives = bool(fixed_negatives)
         self.fixed_conditions = bool(fixed_conditions)
         self.image_root = image_root
         self.training = bool(training)
@@ -254,11 +294,7 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
                 self.records.append(item)
         if not self.records:
             raise ValueError("No pair-list records remain after patient-disjoint filtering.")
-        if max_targets is not None:
-            if int(max_targets) <= 0:
-                raise ValueError("max_targets must be positive.")
-            # Seeded sample across patients/channels, rather than the first channel.
-            self.records = random.Random(self.seed).sample(self.records, min(int(max_targets), len(self.records)))
+        self.records = select_target_records(self.records, max_targets, self.seed, patient_balanced)
         self.regions = sorted({r["region"] for r in self.records})
         self.region_to_idx = {name: i for i, name in enumerate(self.regions)}
         # Store one pool per region, rather than one O(N) list per image.
@@ -296,7 +332,16 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
     def __getitem__(self, index):
         record = self.records[index]
         rng = random.Random() if self.training and not self.fixed_conditions else random.Random(self.seed + index)
-        conditions = select_conditions(record, self.max_conditions, rng, self.training)
+        condition_rng = rng
+        if self.training and self.condition_sampling is not None:
+            if self.condition_sampling == "resample":
+                condition_rng = random.Random()
+            else:
+                view = random.randrange(self.condition_views) if self.condition_sampling == "bank" else 0
+                condition_rng = condition_view_rng(self.seed, index, record["target_id"], view)
+        conditions = select_conditions(record, self.max_conditions, condition_rng, self.training)
+        if self.fixed_negatives:
+            rng = random.Random(f"{self.seed}:{record['target_id']}:negative")
         target = self._load(record["target_path"])
         condition_images = torch.zeros(
             self.max_conditions, target.shape[0], target.shape[1], target.shape[2]
@@ -335,6 +380,8 @@ def create_pair_list_spectrogram_split(
     coordinate_scale=100.0, seed=42,
     num_workers=0, prefetch_factor=2, pin_memory=False,
     train_max_targets=None, fixed_conditions=False, donor_protocol="within_split",
+    condition_sampling=None, condition_views=4, fixed_negatives=False,
+    train_patient_balanced=False, val_max_targets=None,
 ):
     records = build_pair_list_records(table_path, image_root, split_manifest if any((Path(image_root).expanduser() / s).is_dir() for s in ("train", "val", "test")) else None)
     manifest = load_patient_split(split_manifest)
@@ -343,7 +390,10 @@ def create_pair_list_spectrogram_split(
         donor_patients=donor_patients_for_split(manifest, split, donor_protocol),
         resolution=resolution, latent_root=latent_root,
         image_root=image_root,
-        max_targets=train_max_targets if split == "train" else None,
+        max_targets=train_max_targets if split == "train" else val_max_targets,
+        patient_balanced=train_patient_balanced if split == "train" else True,
+        condition_sampling=condition_sampling if split == "train" else None,
+        condition_views=condition_views, fixed_negatives=fixed_negatives,
         fixed_conditions=fixed_conditions,
         training=(split == "train"), seed=seed,
     )

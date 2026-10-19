@@ -826,7 +826,7 @@ def train_gen_conditional(
             activation_kwargs=activation_kwargs,
             loss_kwargs=loss_kwargs,
             gen_per_label=gen_per_label,
-            fixed_noise_seed=forward_dict.get("fixed_noise_seed", None),
+            fixed_noise_seed=forward_dict.get("validation_noise_seed", forward_dict.get("fixed_noise_seed", None)),
             lambda_drift=lambda_drift,
             lambda_pair=lambda_pair,
             lambda_condition=lambda_condition,
@@ -846,6 +846,11 @@ def train_gen_conditional(
     )
     train_iter = infinite_sampler(train_loader, step)
     val_iter = infinite_sampler(eval_loader, step) if enable_val_loss else None
+    stable_validation = bool(forward_dict.get("stable_validation", False))
+    fixed_val_batches = None
+    if enable_val_loss and stable_validation:
+        panel_iter = infinite_sampler(eval_loader, 0)
+        fixed_val_batches = [next(panel_iter) for _ in range(min(val_loss_batches, len(eval_loader)))]
     mu.sync_global_devices("conditional train loop started")
     print(f"process_count={jax.process_count()} "
           f"local_device_count={jax.local_device_count()} "
@@ -892,11 +897,13 @@ def train_gen_conditional(
 
         if enable_val_loss and ((step % val_loss_per_step == 0) or (step == total_steps)):
             val_metrics_accum = []
-            for val_idx in range(val_loss_batches):
-                val_batch = preprocess_fn(next(val_iter))
+            count = len(fixed_val_batches) if fixed_val_batches is not None else val_loss_batches
+            validation_state = state.replace(params=state.ema_params) if forward_dict.get("validation_use_ema", False) else state
+            for val_idx in range(count):
+                val_batch = preprocess_fn(fixed_val_batches[val_idx] if fixed_val_batches is not None else next(val_iter))
                 val_batch_size = val_batch["labels"].shape[0]
                 val_select_indices = jax.random.choice(
-                    jax.random.fold_in(rng_val, step * 1000 + val_idx),
+                    jax.random.fold_in(rng_val, val_idx if stable_validation else step * 1000 + val_idx),
                     jnp.arange(val_batch_size),
                     (bsz_per_host,),
                     replace=(val_batch_size < bsz_per_host),
@@ -905,9 +912,12 @@ def train_gen_conditional(
                     key: value[val_select_indices] if hasattr(value, "shape") and value.shape[0] == val_batch_size else value
                     for key, value in val_batch.items()
                 }
-                val_metrics_accum.append(val_loss_step_jit(state, val_batch, feature_params))
+                val_metrics_accum.append(val_loss_step_jit(validation_state, val_batch, feature_params))
             val_metrics = jax.tree.map(lambda *xs: sum(xs) / len(xs), *val_metrics_accum)
             metrics.update({f"val/{key}": value for key, value in val_metrics.items()})
+            metrics["validation_uses_ema"] = float(bool(forward_dict.get("validation_use_ema", False)))
+            metrics["validation_fixed_panel"] = float(stable_validation)
+            metrics["validation_batches"] = count
 
         logger.set_step(step)
         logger.log_dict(metrics)

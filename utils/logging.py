@@ -187,7 +187,7 @@ class WandbLogger:
         if self._wandb is not None and is_rank_zero():
             self._wandb.finish()
 
-    def save_loss_plot(self, filename: str = "loss_curve.png") -> Optional[Path]:
+    def save_loss_plot(self, filename: str = "loss_curve.png", metric_key: Optional[str] = None) -> Optional[Path]:
         """Plot logged train/validation losses from the offline JSONL history."""
         if not is_rank_zero():
             return None
@@ -198,6 +198,8 @@ class WandbLogger:
 
         objective_train_points: list[tuple[int, float]] = []
         objective_val_points: list[tuple[int, float]] = []
+        pair_train_points: list[tuple[int, float]] = []
+        pair_val_points: list[tuple[int, float]] = []
         semantic_train_points: list[tuple[int, float]] = []
         semantic_val_points: list[tuple[int, float]] = []
         with metrics_path.open("r", encoding="utf-8") as handle:
@@ -208,6 +210,8 @@ class WandbLogger:
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                     continue
                 for key, points in (
+                    ("loss_pair", pair_train_points),
+                    ("val/loss_pair", pair_val_points),
                     ("loss", objective_train_points),
                     ("val/loss", objective_val_points),
                     ("semantic_loss", semantic_train_points),
@@ -217,7 +221,13 @@ class WandbLogger:
                     if isinstance(value, (int, float)) and math.isfinite(value):
                         points.append((step, float(value)))
 
-        if semantic_train_points:
+        if pair_train_points and metric_key is None:
+            train_points = pair_train_points
+            val_points = pair_val_points
+            train_label = "train/loss_pair"
+            val_label = "val/loss_pair"
+            title = "Training and validation paired latent L1"
+        elif semantic_train_points:
             train_points = semantic_train_points
             val_points = semantic_val_points
             train_label = "train/semantic_loss"
@@ -289,6 +299,8 @@ class WandbLogger:
         output_path = self.offline_dir / filename
         image.save(output_path)
         log_for_0("Saved loss plot to %s", output_path)
+        if metric_key is None and pair_train_points and semantic_train_points:
+            self.save_loss_plot("semantic_loss_curve.png", metric_key="semantic_loss")
         return output_path
 
 

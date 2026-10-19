@@ -34,6 +34,7 @@ def main():
     parser.add_argument("--num-samples", type=int, default=16)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--fixed-noise-seed", type=int, help="Reuse the training diagnostic noise key; requires batch size and sample count one.")
+    parser.add_argument("--condition-seed", type=int, help="Set donor selection independently of generator noise.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint-step", type=int, default=None)
     parser.add_argument("--hsdp-dim", type=int, default=1)
@@ -70,7 +71,7 @@ def main():
     if not record["conditions"]:
         raise ValueError("No donor channels remain in the requested patient split.")
     max_conditions = int(config.dataset.get("max_conditions", 8))
-    selected = select_conditions(record, max_conditions, random.Random(args.seed), training=args.training_condition_selection)
+    selected = select_conditions(record, max_conditions, random.Random(args.seed if args.condition_seed is None else args.condition_seed), training=args.training_condition_selection)
     if args.shuffle_condition_images:
         pool = sorted({path for r in records
                        for c in r["conditions"] if c["patient"] in donors and c["patient"] != record["target_patient"]

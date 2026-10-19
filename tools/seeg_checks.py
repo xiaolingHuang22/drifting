@@ -165,13 +165,16 @@ def main():
         subset = PairListSpectrogramDataset(records, manifest['train'],
                     max_targets=ds['train_max_targets'], seed=ds.get('seed', 42),
                     fixed_conditions=True,
+                    patient_balanced=bool(ds.get('train_patient_balanced', False)),
                     donor_patients=donor_patients_for_split(manifest, 'train', ds.get('donor_protocol', 'within_split')))
         result['overfit_targets'] = [
             {'target_id': r.get('channel_id', r['target_id']),
              'target_segment': Path(r['target_path']).name,
              'conditions': [c['path'] for c in select_conditions(r, ds.get('max_conditions', 8),
                             random.Random(ds.get('seed', 42) + i), training=True)],
-             'inference_seed': ds.get('seed', 42) + i}
+             'inference_seed': ds.get('seed', 42) + i,
+             'condition_sampling': ds.get('condition_sampling', 'legacy'),
+             'conditions_are_view_zero': True}
             for i, r in enumerate(subset.records)]
     output.write_text(json.dumps(result, indent=2))
     print(json.dumps({s: {k:v for k,v in summary.items() if k != 'targets'} for s, summary in result.items() if s in ('train', 'val', 'test')}, indent=2))
