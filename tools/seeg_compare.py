@@ -57,6 +57,11 @@ def main():
     mean, median = latents.mean(0), np.median(latents, axis=0)
     out = Path(a.outdir).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
+    manifest = {'status': 'running', 'config': a.config, 'audit': a.audit,
+                'raw_checkpoint': a.raw, 'ema_checkpoint': a.ema,
+                'num_samples': a.num_samples,
+                'target_directories': [f'target_{i:02d}' for i in range(min(a.targets,len(targets)))]}
+    (out/'comparison_manifest.json').write_text(json.dumps(manifest,indent=2))
     np.save(out / 'train_mean_latent.npy', mean)
     np.save(out / 'train_median_latent.npy', median)
     report = []
@@ -82,6 +87,10 @@ def main():
         item['raw_shuffle_relative_to_target_abs_mean'] = float(difference.mean() / max(float(np.abs(latents[i]).mean()), 1e-12))
         report.append(item)
         (out / 'comparison.json').write_text(json.dumps(report, indent=2))
+    manifest['status'] = 'complete'
+    (out/'comparison_manifest.json').write_text(json.dumps(manifest,indent=2))
+    from tools.seeg_image_summary import write_summary
+    write_summary(out)
     print(f'Report: {out / "comparison.json"}')
 
 

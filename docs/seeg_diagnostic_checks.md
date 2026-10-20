@@ -980,3 +980,113 @@ memorization. These controls test whether positive/negative construction contrib
 to that gap; they do not assume it is the sole cause. Keep the original VAE,
 patient split, reference-donor protocol and confirmed resting-state assumption.
 No new paper-derived architecture is introduced.
+
+## 21. Average MSE, RMSE, SSIM and PSNR for raw/EMA/shuffled comparison images
+
+New tools.seeg_compare runs automatically create three additional files:
+
+- image_metrics_summary.json: counts, per-image averages/standard deviations,
+  target-macro averages and pooled error metrics, separately for raw, ema and
+  raw_shuffled, against both original and target VAE-reconstruction images.
+- image_metrics_summary.csv: one row per variant/reference, convenient for a table.
+- comparison_manifest.json: selected target directories, samples per target,
+  checkpoint paths and completion status. The summary uses this to exclude old
+  higher-numbered samples/targets left over from earlier runs in the same outdir.
+
+The existing comparison.json continues to contain latent errors and condition
+sensitivity. Its format is unchanged. No training objective is changed here.
+
+To score PNGs from an ALREADY COMPLETED comparison, no training, checkpoint loading
+or GPU inference is required:
+
+```bash
+python -m tools.seeg_image_summary \
+  --comparison-dir runs/seeg_field_c_20k_comparison --num-samples 4
+```
+
+Replace the path with A/B/C or any older tools.seeg_compare output directory.
+Set --num-samples to the number used in that comparison. For legacy directories
+without a manifest, omitting this option includes ALL sample_XXXXXX.png files
+present; specify the count if outputs may contain stale files. With a completed
+new manifest, its sample count and target list are used automatically. Missing
+expected samples/references raise an error rather than silently changing the
+comparison population. An incomplete new manifest must be completed before scoring.
+
+Default exports are image_metrics_summary.json and image_metrics_summary.csv
+inside the comparison directory. To choose another output name:
+
+```bash
+python -m tools.seeg_image_summary \
+  --comparison-dir runs/seeg_field_c_20k_comparison --num-samples 4 \
+  --output runs/seeg_field_c_20k_image_averages.json
+```
+
+A matching CSV is written beside that JSON. Repeat per experiment/checkpoint.
+The three variant names correspond to existing folders; raw_shuffled means shuffled
+condition images with raw weights. These files do not imply a shuffled EMA run.
+
+Each generated sample is compared with the references saved in its own target/variant
+folder. All generated images receive equal weight; there is no best-of-N selection.
+Look at variants.ema.references.original.mean_per_image for the requested original-
+image averages. Use references.vae_reconstruction to separately measure error to
+what the encoder/decoder can reproduce. target_macro weights each target equally
+if sample counts differ. image_count, target_count and samples_per_target make
+coverage explicit; compare runs on the same targets and number of generated images.
+
+Definitions and conventions:
+
+- mse: mean squared RGB error with pixels normalized to [0,1].
+- rmse: square root of that image's MSE; the summary averages those per-image RMSEs.
+- ssim_gray: local grayscale SSIM, averaging RGB channels before calculation;
+  Gaussian sigma 1.5, population covariance and a five-pixel border crop. This
+  matches the previously used held-out evaluation convention.
+- psnr_db: per-image PSNR with data range one, averaged in dB. Perfect matches are
+  capped at 120 dB so JSON/CSV stay finite.
+- pooled_rmse/pooled_psnr_db: calculated from the pixel-weighted pooled MSE across
+  all images, reported separately. These generally differ from averaging each
+  image's RMSE/PSNR; do not substitute one for the other in results tables.
+
+MSE and RMSE are lower-is-better; SSIM and PSNR are higher-is-better. Shapes must
+match: the summary does not resize images or change their contrast to improve
+scores. These are display-space metrics, not calibrated SEEG band-power or waveform
+measurements. Lower pixel errors can favor smoothed predictions; interpret them
+alongside structures, baselines and held-out performance. The evaluator also now
+includes image_mse in its normal per-sample and aggregate evaluation.json outputs.
+
+For this standalone command, only Python, NumPy, Pillow and SciPy are needed; it
+uses no VAE/JAX/GPU inference. Update utils/spectrogram_metrics.py together with
+tools/seeg_evaluate.py because their metric implementation is now shared.
+
+## 22. Interpret loss versus semantic loss in the field experiments
+
+There are THREE distinct quantities in metrics.jsonl:
+
+1. loss_pair (and val/loss_pair): mean absolute difference between generated and
+   exact-target VAE latents. This is what loss_curve.png plots when present. It
+   does not directly measure pixel MSE, SSIM or physiological fidelity.
+2. loss (and val/loss): the optimized weighted objective, currently
+   lambda_drift*loss_drift + lambda_pair*loss_pair, with the configured additional
+   condition/TV terms if enabled. With weights 0.1/1 and normalized drift near one,
+   it is approximately loss_pair+0.1. A nearly constant reported drift magnitude
+   does NOT mean its gradient or the attraction/repulsion field is constant.
+3. semantic_loss (and val/semantic_loss): a DETACHED feature-contrast monitor,
+   averaged over feature leaves, based on softplus((negative cosine similarity -
+   positive cosine similarity)/0.1). Equal similarities correspond to log(2),
+   approximately 0.693. It is not a classifier, not a clinical semantic score,
+   and not an extra optimized loss term. Positive padding is excluded.
+
+Thus lower paired error and higher semantic monitor can occur together: one
+measures elementwise latent fidelity, the other relative positive/negative feature
+similarity. Pretrained feature similarity is not guaranteed to rank SEEG examples
+by biological appropriateness. C also changes its TRAINING positive references
+from one to several segments, so its training semantic monitor is not measuring
+exactly the same reference set as A/B. Validation still uses one exact positive,
+with more generated draws in B/C; judge models with the same offline validation
+panel/sample count in addition to the in-loop monitor.
+
+A lower FINAL validation L1 than another run does not establish the best checkpoint
+or a generalization improvement. Compare each run's best validation checkpoints,
+constant/donor baselines and image metrics. A flatter curve can reflect less
+memorization OR underfitting and average-looking output. Do not choose a model
+from semantic_loss alone or compare training total loss as though changing field
+sample construction left the objective identical.

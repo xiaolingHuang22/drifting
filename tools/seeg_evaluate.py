@@ -8,7 +8,6 @@ import sys
 
 import numpy as np
 from PIL import Image
-from scipy.ndimage import gaussian_filter
 import yaml
 
 from dataset.pair_list_spectrogram import (
@@ -16,25 +15,8 @@ from dataset.pair_list_spectrogram import (
     eligible_conditions, latent_cache_path, select_target_records,
 )
 from tools.seeg_compare import load_latent
+from utils.spectrogram_metrics import image_metrics
 
-
-def image_metrics(reference, prediction):
-    # Images in [0,1]. These are display-space metrics, not physical SEEG power.
-    x, y = reference.mean(axis=-1), prediction.mean(axis=-1)
-    diff = prediction - reference
-    mse = float(np.mean(diff ** 2))
-    mx, my = gaussian_filter(x, 1.5), gaussian_filter(y, 1.5)
-    vx = np.maximum(gaussian_filter(x*x, 1.5) - mx*mx, 0)
-    vy = np.maximum(gaussian_filter(y*y, 1.5) - my*my, 0)
-    cov = gaussian_filter(x*y, 1.5) - mx*my
-    ssim = ((2*mx*my + .01**2)*(2*cov + .03**2) /
-            ((mx*mx+my*my+.01**2)*(vx+vy+.03**2)))
-    return {'image_mae': float(np.abs(diff).mean()), 'image_rmse': mse**.5,
-            'psnr_db': float(-10*np.log10(max(mse, 1e-12))),
-            'ssim_gray': float(ssim[5:-5, 5:-5].mean()),
-            'row_profile_mae': float(np.abs(x.mean(1)-y.mean(1)).mean()),
-            'column_profile_mae': float(np.abs(x.mean(0)-y.mean(0)).mean()),
-            'gradient_mae': float(np.mean([np.abs(np.diff(x, axis=a)-np.diff(y, axis=a)).mean() for a in (0, 1)]))}
 
 
 def average(rows):
