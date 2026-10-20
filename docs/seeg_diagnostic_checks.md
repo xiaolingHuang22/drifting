@@ -812,3 +812,171 @@ improves while validation does not, prioritize predictive information in donors,
 recording-state metadata and task definition before more memorization training.
 Arbitrary cross-patient segments may not predict an exact target's fine texture;
 no sampling change guarantees the validation L1 will approach reconstruction error.
+
+## 18. Generate controlled drifting-field sample experiments
+
+The dataset remains `~/RAE_first_exp/{train,val,test}/PATIENT/CHANNEL/*.png`.
+No filenames, split assignments, graph edges, encoder or latent representation
+change. Existing complete caches can be reused. The next question is whether
+single generated/positive examples and different-region real negatives limit the
+conditional drifting field. These are controls, not a promised generalization fix.
+
+Generate five configs from the exact recovery256 bank config used previously:
+
+```bash
+python -m tools.seeg_field_experiments \
+  --config configs/gen/recovery256/seeg_recovery256_bank.yaml \
+  --output configs/gen/field256 --targets 256 --steps 100000 \
+  --generated 4 --positives 4 --negative-weight 0.25
+```
+
+The helper preserves the selected base's donor bank, condition views, target-subset
+seed/balancing, VAE, model, optimizer/LR, stable validation settings and drift weight.
+It keeps lambda_pair=1 and lambda_drift positive. All runs start from scratch.
+The following changes are sequential controls:
+
+| Config suffix | Generated per condition | Positive slots | Explicit real-negative weight |
+| --- | --- | --- | --- |
+| a_anchor | 1 | 1 | 1 |
+| b_multigen | 4 | 1 | 1 |
+| c_multipos | 4 | 4 | 1 |
+| d_softneg | 4 | 4 | 0.25 |
+| e_norealneg | 4 | 4 | 0 |
+
+Files are named seeg_field_SUFFIX.yaml. A versus B isolates generated count; B
+versus C isolates positive count; C versus D/E isolates explicit-real-negative
+weight. D is optional; do not launch all five full runs automatically. Run A/B
+first, then C, then D or E depending on results and budget. A is a matched control
+and can also be compared with the existing recovery256 baseline, but use the new
+run if comparing exact initialization/history. Warm-starting from old checkpoints
+would change the comparison. Use new empty workdirs.
+
+Positive slot zero is ALWAYS the exact target segment. Additional positives are
+distinct images from the SAME patient's SAME channel folder, selected reproducibly
+per anchor. They may cover different two-minute intervals; they are samples of
+that channel's resting-state distribution, not synchronized copies of the anchor.
+The exact target remains the ONLY L1 anchor for every generated sample. Conditions
+remain other-patient neighbors from the pair table; positive images are loss inputs,
+never generator conditions. Validation/test patients never provide training positives.
+
+If fewer images exist, the remaining slots contain masked padding; duplicates
+are not counted as extra positives. For example, two available images with k_pos=4
+produce positive_mask=[1,1,0,0]. Padding contributes neither to field affinities nor
+to the semantic monitor. `dataset.positive_sampling: fixed` makes the new comparison
+reproducible; `resample` is supported for a later, separately controlled experiment.
+
+A training target cap limits anchor images, NOT the same-channel positive library.
+C/D/E can use other training segments of the selected channels outside the 256
+anchors. This expansion is part of the intended positive-pool change and must be
+reported, not described as identical supervised data exposure. The audit now reports
+anchor and available positive-image counts, singleton channels, generated count,
+negative weight, and selected positive_paths/masks for capped training targets.
+
+All configs set dataset.val_k_pos=1: validation keeps the exact target as its single
+positive, with the same examples/noise/EMA protocol. Training can therefore have
+multiple positive segments without granting extra held-out positive segments to
+validation scoring. Existing configs default to k_pos=1; their behavior is preserved.
+
+## 19. Run the generated-sample and positive-pool controls
+
+Example A (repeat for B by replacing a_anchor with b_multigen in every path):
+
+```bash
+python -m tools.seeg_checks audit \
+  --config configs/gen/field256/seeg_field_a_anchor.yaml \
+  --output runs/seeg_field_a_anchor_audit.json
+CUDA_VISIBLE_DEVICES=0 python main.py --gen \
+  --config configs/gen/field256/seeg_field_a_anchor.yaml \
+  --workdir runs/seeg_field_a_anchor
+```
+
+For C, use seeg_field_c_multipos.yaml and a matching new workdir/audit. Check its
+positive pool counts before training. More generated/positive samples increase
+feature-extractor activation memory and runtime. Run a short smoke check first.
+If four generated samples do not fit GPU memory, regenerate ALL experiment configs
+in a new directory with --generated 2 and keep --positives 4. If positive features
+also do not fit, use --positives 2 consistently for C/D/E. Do not silently change
+batch size, model or loss weights in only one variant to handle memory.
+
+Report both optimizer steps and forward_kimg: B-E generate four samples per target
+visit versus A's one. Equal steps preserve anchor visits, not compute or generated
+sample exposure. Initial comparisons at 10k/20k are useful for deciding whether
+longer runs are justified; select checkpoints on the same validation panel rather
+than choosing the last checkpoint just because training error is lower.
+
+Example checkpoint exports/comparison for C at 20000:
+
+```bash
+python -m tools.seeg_checks export \
+  --checkpoint-dir runs/seeg_field_c_multipos/checkpoints --step 20000 \
+  --weights raw --output runs/seeg_field_c_20k_raw
+python -m tools.seeg_checks export \
+  --checkpoint-dir runs/seeg_field_c_multipos/checkpoints --step 20000 \
+  --weights ema --output runs/seeg_field_c_20k_ema
+CUDA_VISIBLE_DEVICES=0 python -m tools.seeg_compare \
+  --config configs/gen/field256/seeg_field_c_multipos.yaml \
+  --audit runs/seeg_field_c_multipos_audit.json \
+  --raw runs/seeg_field_c_20k_raw --ema runs/seeg_field_c_20k_ema \
+  --targets 32 --num-samples 4 --outdir runs/seeg_field_c_20k_comparison
+```
+
+This is a TRAINING-target comparison; --targets 256 evaluates all anchors. Use
+matching paths for A/B/D/E and for other checkpoints. New training metrics include
+positive_count (actual unmasked positives), generated_per_condition,
+real_negative_weight, and gen_pair_distance when multiple samples are generated.
+Semantic_loss remains a detached feature-similarity monitor; positive padding is
+excluded. Changing positive sets changes that monitor's reference distribution,
+so compare actual target L1 and validation image/structure metrics too.
+
+## 20. Test explicit negatives while retaining drifting
+
+C retains the existing different-region real negatives. D reduces their weight;
+E sets it to zero. In ALL of B-E, distinct generated samples still repel one
+another and are attracted toward positive samples. Thus E is NOT L1-only training.
+Generated repulsion is unchanged by real_negative_weight. Do not set generated
+count to one in E: that would remove the distinct generated companions this
+control is designed to retain.
+
+```bash
+python -m tools.seeg_checks audit \
+  --config configs/gen/field256/seeg_field_e_norealneg.yaml \
+  --output runs/seeg_field_e_norealneg_audit.json
+CUDA_VISIBLE_DEVICES=0 python main.py --gen \
+  --config configs/gen/field256/seeg_field_e_norealneg.yaml \
+  --workdir runs/seeg_field_e_norealneg
+```
+
+D runs identically using d_softneg paths. Settings live in
+train.loss_kwargs.real_negative_weight. This weight changes affinity and scale
+calculations; because the field is normalized, 0.25 does NOT promise one quarter
+of the final gradient. Zero-weight real negatives are masked before softmax and
+excluded from field scaling/forces. Their images are still loaded for the detached
+semantic monitor, so E does not eliminate all negative-image memory/I/O. The
+monitor can still compare to them even though they no longer supervise the field.
+
+Use the SAME saved validation panel for all variants, as in Section 14:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m tools.seeg_evaluate \
+  --config configs/gen/field256/seeg_field_c_multipos.yaml \
+  --init-from runs/seeg_field_c_20k_ema \
+  --split val --panel runs/seeg_generalization_val_panel.json \
+  --targets-per-patient 4 --num-samples 4 --seed 42 \
+  --outdir runs/seeg_field_c_val_20k
+```
+
+Repeat with each variant's config/export and unique outdir, then repeat with
+--shuffle-condition-images. Reuse the existing patient-held-out panel; do not
+select a panel based on which targets look good. Compare patient-macro latent L1,
+SSIM/profile errors, VAE references, mean/donor baselines and generated diversity.
+Do not compare total training loss as if it were the same objective across variants.
+The in-loop validation sample count changes with generated_per_condition; offline
+seeg_evaluate with the same --num-samples/seed/batch size gives the stricter common
+measurement. Validation L1 still measures the exact target segment, not whether
+other plausible resting-state samples are physiologically acceptable.
+
+Improved training texture without improved held-out measurements is still
+memorization. These controls test whether positive/negative construction contributes
+to that gap; they do not assume it is the sole cause. Keep the original VAE,
+patient split, reference-donor protocol and confirmed resting-state assumption.
+No new paper-derived architecture is introduced.

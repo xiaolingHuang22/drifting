@@ -1,4 +1,5 @@
 import jax
+import math
 import jax.numpy as jnp
 from functools import partial
 from einops import repeat
@@ -11,7 +12,7 @@ def cdist(x, y, eps=1e-8):
     sq_dist = xnorms[:, :, None] + ynorms[:, None, :] - 2 * xydot
     return jnp.sqrt(jnp.clip(sq_dist, a_min=eps))
 
-@partial(jax.jit, static_argnames=("R_list",))
+@partial(jax.jit, static_argnames=("R_list", "real_negative_weight"))
 def drift_loss(
     gen,
     fixed_pos,
@@ -21,6 +22,7 @@ def drift_loss(
     weight_neg=None,
     positive_mask=None,
     R_list=(0.02, 0.05, 0.2),
+    real_negative_weight=1.0,
 ):
     '''
     Args:
@@ -31,6 +33,8 @@ def drift_loss(
         weight_pos: [B, C_p] (optional; if None: weight is 1)
         weight_neg: [B, C_n] (optional; if None: weight is 1)
         R_list: a list of R values to use for the kernel function
+        real_negative_weight: nonnegative weight for explicit real negatives;
+            generated-sample repulsion is unchanged.
     Returns:
         loss: [batch_size]
         (optional) info: a dict with entries:
@@ -38,6 +42,8 @@ def drift_loss(
             loss_R: the loss for each R value
     '''
     
+    if not math.isfinite(real_negative_weight) or real_negative_weight < 0:
+        raise ValueError("real_negative_weight must be finite and nonnegative")
     # 1. Defaults & Casting
     B, C_g, S = gen.shape
     C_p = fixed_pos.shape[1]
@@ -57,7 +63,7 @@ def drift_loss(
     fixed_neg = fixed_neg.astype(jnp.float32)
     weight_gen = weight_gen.astype(jnp.float32)
     weight_pos = weight_pos.astype(jnp.float32)
-    weight_neg = weight_neg.astype(jnp.float32)
+    weight_neg = weight_neg.astype(jnp.float32) * real_negative_weight
     if positive_mask is not None:
         positive_mask = positive_mask.astype(jnp.float32)
         expected = (B, C_g, C_p)
@@ -97,6 +103,10 @@ def drift_loss(
         
         for R in R_list:
             logits = -dist_normed / R
+            # Zero-weight entries must not absorb affinity in either softmax.
+            # This also makes masked positive padding and omitted real negatives
+            # equivalent to removing those entries from the field.
+            logits = jnp.where(targets_w_in[:, None, :] > 0, logits, -1e30)
 
             affinity = jax.nn.softmax(logits, axis=-1)
             aff_transpose = jax.nn.softmax(logits, axis=-2)

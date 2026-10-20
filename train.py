@@ -452,8 +452,10 @@ def train_step_conditional(
             feature_neg = enforce_ddp(rearrange(feature_neg, "b x f d -> (b f) x d"))
             feature_gen = enforce_ddp(rearrange(gen_feature, "b x f d -> (b f) x d"))
             positive_mask = None
+            positive_weights = jnp.ones_like(feature_pos[:, :, 0])
             if "positive_mask" in batch:
                 base_mask = batch["positive_mask"]
+                positive_weights = repeat(base_mask, "b p -> (b f) p", f=gen_feature.shape[2])
                 positive_mask = repeat(
                     base_mask,
                     "b p -> (b f) g p",
@@ -465,7 +467,7 @@ def train_step_conditional(
                 fixed_pos=feature_pos,
                 fixed_neg=feature_neg,
                 weight_gen=jnp.ones_like(feature_gen[:, :, 0]),
-                weight_pos=jnp.ones_like(feature_pos[:, :, 0]),
+                weight_pos=positive_weights,
                 weight_neg=jnp.ones_like(feature_neg[:, :, 0]),
                 positive_mask=positive_mask,
                 **loss_kwargs,
@@ -483,7 +485,9 @@ def train_step_conditional(
             neg_unit = feature_neg / jnp.clip(
                 jnp.linalg.norm(feature_neg, axis=-1, keepdims=True), a_min=eps
             )
-            pos_similarity = jnp.einsum("bgd,bpd->bgp", gen_unit, pos_unit).mean()
+            positive_similarity = jnp.einsum("bgd,bpd->bgp", gen_unit, pos_unit)
+            pos_similarity = (positive_similarity * positive_weights[:, None, :]).sum() / jnp.maximum(
+                positive_weights.sum() * feature_gen.shape[1], 1.)
             neg_similarity = jnp.einsum("bgd,bnd->bgn", gen_unit, neg_unit).mean()
             semantic_loss = jax.nn.softplus((neg_similarity - pos_similarity) / 0.1)
             info = dict(info)
@@ -562,6 +566,10 @@ def train_step_conditional(
             drift_feature_count, dtype=jnp.float32
         )
         total_info["loss_pair"] = pair_loss
+        total_info["generated_per_condition"] = jnp.asarray(gen_per_label, dtype=jnp.float32)
+        total_info["positive_count"] = (jnp.asarray(batch["positive_mask"]).sum(axis=-1).mean()
+                                        if "positive_mask" in batch else jnp.asarray(n_pos, dtype=jnp.float32))
+        total_info["real_negative_weight"] = jnp.asarray(loss_kwargs.get("real_negative_weight", 1.), dtype=jnp.float32)
         total_info["loss_condition"] = condition_loss_total
         total_info["loss_tv"] = tv_loss
         total_info["semantic_loss"] = semantic_loss_total / max(semantic_loss_count, 1)

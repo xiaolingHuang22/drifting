@@ -131,7 +131,7 @@ def main():
         cfg['optimizer']['lr_schedule']['total_steps'] = args.steps
         output.write_text(yaml.safe_dump(cfg, sort_keys=False))
         return
-    from dataset.pair_list_spectrogram import build_pair_list_records, load_patient_split, donor_patients_for_split, eligible_conditions
+    from dataset.pair_list_spectrogram import build_pair_list_records, load_patient_split, donor_patients_for_split, eligible_conditions, select_positive_paths, select_target_records
     ds = cfg['dataset']
     root = Path(ds['image_root']).expanduser()
     segmented = any((root / s).is_dir() for s in ('train', 'val', 'test'))
@@ -159,6 +159,21 @@ def main():
         result[split] = {'donor_protocol': ds.get('donor_protocol', 'within_split'), 'patients': len(allowed), 'target_channels': len(targets),
                          'retained_segments': sum(t['target_segments'] for t in targets.values() if t['eligible_channels']),
                          'eligible_channel_histogram': histogram, 'targets': targets}
+    import random
+    training_donors = donor_patients_for_split(manifest, 'train', ds.get('donor_protocol', 'within_split'))
+    anchors = select_target_records([r for r in records if r['target_patient'] in manifest['train']
+                                    and eligible_conditions(r, training_donors)],
+                                   ds.get('train_max_targets'), ds.get('seed',42),
+                                   ds.get('train_patient_balanced',False))
+    result['field_sampling'] = {
+        'generated_per_condition': cfg.get('train',{}).get('forward_dict',{}).get('gen_per_label',1),
+        'k_pos': ds.get('k_pos',1), 'val_k_pos': ds.get('val_k_pos',ds.get('k_pos',1)),
+        'positive_sampling': ds.get('positive_sampling','fixed'),
+        'real_negative_weight': cfg.get('train',{}).get('loss_kwargs',{}).get('real_negative_weight',1.),
+        'training_anchor_images': len(anchors),
+        'available_training_positive_images': len({p for r in anchors for p in r.get('target_paths',[r['target_path']])}),
+        'anchor_channels_with_one_segment': len({r.get('channel_id',r['target_id']) for r in anchors if len(r.get('target_paths',[r['target_path']])) == 1}),
+    }
     if ds.get('train_max_targets'):
         from dataset.pair_list_spectrogram import PairListSpectrogramDataset, select_conditions
         import random
@@ -173,6 +188,8 @@ def main():
              'conditions': [c['path'] for c in select_conditions(r, ds.get('max_conditions', 8),
                             random.Random(ds.get('seed', 42) + i), training=True)],
              'inference_seed': ds.get('seed', 42) + i,
+             'positive_paths': select_positive_paths(r, ds.get('k_pos',1), random.Random(f"{ds.get('seed',42)}:{r['target_id']}:positive"))[0],
+             'positive_mask': select_positive_paths(r, ds.get('k_pos',1), random.Random(f"{ds.get('seed',42)}:{r['target_id']}:positive"))[1],
              'condition_sampling': ds.get('condition_sampling', 'legacy'),
              'conditions_are_view_zero': True}
             for i, r in enumerate(subset.records)]

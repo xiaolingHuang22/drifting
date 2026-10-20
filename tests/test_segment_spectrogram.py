@@ -11,7 +11,7 @@ from PIL import Image
 
 from dataset.pair_list_spectrogram import (
     PairListSpectrogramDataset, build_pair_list_records,
-    latent_cache_path, load_patient_split, select_conditions,
+    latent_cache_path, load_patient_split, select_conditions, create_pair_list_spectrogram_split,
 )
 
 
@@ -59,6 +59,20 @@ class SegmentDatasetTest(unittest.TestCase):
             self.assertEqual([r['target_id'] for r in fixed.records],
                 [r['target_id'] for r in PairListSpectrogramDataset(records, manifest['train'],
                      max_targets=8, seed=42).records])
+            multi = PairListSpectrogramDataset(records, manifest['train'], max_conditions=4,
+                         k_neg=1, k_pos=4, latent_root=cache, image_root=images)
+            self.assertEqual(tuple(multi[0]['target_ref'].shape), (4,4,32,32))
+            np.testing.assert_array_equal(multi[0]['positive_mask'],[1.,1.,0.,0.])
+            kwargs = dict(table_path=table, image_root=images, split_manifest=split_path,
+                          resolution=256, batch_size=1, k_pos=4, val_k_pos=1,
+                          latent_root=cache, use_natural_vae=False)
+            train_loader, preprocess, _ = create_pair_list_spectrogram_split(split='train', **kwargs)
+            batch = next(iter(train_loader))
+            processed = preprocess({k:v.numpy() if hasattr(v,'numpy') else v for k,v in batch.items()})
+            self.assertEqual(processed['target_ref'].shape,(1,4,32,32,4))
+            np.testing.assert_array_equal(processed['target_ref'][:,0],processed['target_true'])
+            val_loader, _, _ = create_pair_list_spectrogram_split(split='val', **kwargs)
+            self.assertEqual(val_loader.dataset.k_pos,1)
             sample = ds[0]
             self.assertEqual(tuple(sample['source'].shape), (4, 4, 32, 32))
             self.assertEqual(tuple(sample['target_true'].shape), (4, 32, 32))

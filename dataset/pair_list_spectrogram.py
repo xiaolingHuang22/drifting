@@ -1,9 +1,8 @@
-"""Patient-disjoint pair-list SEEG dataset for conditional drifting.
+"""Segment-level SEEG examples with channel metadata and conditional donor sets.
 
-The CSV is grouped by ``patient_channel``.  Each unique target channel becomes
-one example and all corresponding ``pair`` rows become its variable-length
-condition set.  Split manifests are patient based so a held-out patient cannot
-appear as either a target or a donor in another split.
+Target patients remain split-disjoint. Donors follow either within-split or
+training-reference eligibility. Positive segments stay in the target channel;
+only loss calculations receive targets and positive images.
 """
 
 from __future__ import annotations
@@ -130,6 +129,19 @@ def select_conditions(record, max_conditions, rng, training=False):
     return selected
 
 
+def select_positive_paths(record, count, rng):
+    """Exact anchor first, distinct same-channel segments next, masked padding last."""
+    if int(count) < 1:
+        raise ValueError("k_pos must be positive")
+    anchor = record["target_path"]
+    paths = sorted(set(record.get("target_paths", [anchor])) - {anchor})
+    if any(Path(path).parent != Path(anchor).parent for path in paths):
+        raise ValueError("Positive paths must stay in the target channel folder")
+    selected = [anchor] + rng.sample(paths, min(len(paths), int(count)-1))
+    mask = [1.] * len(selected) + [0.] * (int(count)-len(selected))
+    return selected + [anchor] * (int(count)-len(selected)), mask
+
+
 def build_pair_list_records(table_path: str | Path, image_root: str | Path, split_manifest=None):
     """Group channel metadata, then expand segmented channels into image records."""
     table_path = Path(table_path).expanduser().resolve()
@@ -253,6 +265,8 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
         donor_patients=None,
         max_conditions=8,
         k_neg=4,
+        k_pos=1,
+        positive_sampling="fixed",
         resolution=256,
         latent_root=None,
         training=False,
@@ -278,6 +292,10 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
         self.seed = int(seed)
         self.max_conditions = int(max_conditions)
         self.k_neg = int(k_neg)
+        self.k_pos = int(k_pos)
+        if self.k_pos < 1 or positive_sampling not in ("fixed", "resample"):
+            raise ValueError("k_pos must be positive and positive_sampling must be fixed or resample")
+        self.positive_sampling = positive_sampling
         self.latent_root = (
             Path(latent_root).expanduser().resolve() if latent_root else None
         )
@@ -343,6 +361,11 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
         if self.fixed_negatives:
             rng = random.Random(f"{self.seed}:{record['target_id']}:negative")
         target = self._load(record["target_path"])
+        positive_rng = (random.Random() if self.training and self.positive_sampling == "resample"
+                        else random.Random(f"{self.seed}:{record['target_id']}:positive"))
+        positive_paths, positive_mask = select_positive_paths(record, self.k_pos, positive_rng)
+        positives = torch.stack([target if path == record["target_path"] else self._load(path)
+                                 for path in positive_paths])
         condition_images = torch.zeros(
             self.max_conditions, target.shape[0], target.shape[1], target.shape[2]
         )
@@ -363,30 +386,31 @@ class PairListSpectrogramDataset(torch.utils.data.Dataset):
             "condition_coord": condition_coords,
             "condition_distance": condition_distances,
             "target_true": target,
-            "target_ref": target.unsqueeze(0),
+            "target_ref": positives,
             "negative": torch.stack([self._load(x["target_path"]) for x in negatives]),
             "source_coord": condition_coords[0],
             "target_coord": torch.tensor(record["target_coord"], dtype=torch.float32),
             "region_id": torch.tensor(self.region_to_idx[record["region"]], dtype=torch.int64),
             "labels": torch.tensor(0, dtype=torch.int64),
-            "positive_mask": torch.ones(1, dtype=torch.float32),
+            "positive_mask": torch.tensor(positive_mask, dtype=torch.float32),
             "target_id": record["target_id"],
         }
 
 
 def create_pair_list_spectrogram_split(
     *, table_path, image_root, split_manifest, split, resolution, batch_size,
-    max_conditions=8, k_neg=4, use_natural_vae=True, latent_root=None,
+    max_conditions=8, k_neg=4, k_pos=1, positive_sampling="fixed", use_natural_vae=True, latent_root=None,
     coordinate_scale=100.0, seed=42,
     num_workers=0, prefetch_factor=2, pin_memory=False,
     train_max_targets=None, fixed_conditions=False, donor_protocol="within_split",
     condition_sampling=None, condition_views=4, fixed_negatives=False,
-    train_patient_balanced=False, val_max_targets=None,
+    train_patient_balanced=False, val_max_targets=None, val_k_pos=None,
 ):
     records = build_pair_list_records(table_path, image_root, split_manifest if any((Path(image_root).expanduser() / s).is_dir() for s in ("train", "val", "test")) else None)
     manifest = load_patient_split(split_manifest)
     ds = PairListSpectrogramDataset(
         records, manifest[split], max_conditions=max_conditions, k_neg=k_neg,
+        k_pos=(k_pos if split == "train" or val_k_pos is None else val_k_pos), positive_sampling=positive_sampling,
         donor_patients=donor_patients_for_split(manifest, split, donor_protocol),
         resolution=resolution, latent_root=latent_root,
         image_root=image_root,
@@ -433,13 +457,19 @@ def create_pair_list_spectrogram_split(
         neg = jnp.asarray(batch["negative"])
         bn, kn, cn, hn, wn = neg.shape
         neg = _encode_bchw(neg.reshape(bn * kn, cn, hn, wn), keys[2]).reshape(bn, kn, *target.shape[1:])
+        references = jnp.asarray(batch["target_ref"])
+        bp, kp, cp, hp, wp = references.shape
+        target_ref = target[:, None]
+        if kp > 1:
+            extras = _encode_bchw(references[:, 1:].reshape(bp*(kp-1), cp, hp, wp), jax.random.fold_in(rng, 3))
+            target_ref = jnp.concatenate([target_ref, extras.reshape(bp, kp-1, *target.shape[1:])], axis=1)
         return {
             "source": source,
             "condition_mask": jnp.asarray(batch["condition_mask"], dtype=jnp.float32),
             "condition_coord": jnp.asarray(batch["condition_coord"], dtype=jnp.float32) / coordinate_scale,
             "condition_distance": jnp.asarray(batch["condition_distance"], dtype=jnp.float32) / coordinate_scale,
             "target_true": target,
-            "target_ref": target[:, None],
+            "target_ref": target_ref,
             "negative": neg,
             "source_coord": jnp.asarray(batch["source_coord"], dtype=jnp.float32) / coordinate_scale,
             "target_coord": jnp.asarray(batch["target_coord"], dtype=jnp.float32) / coordinate_scale,
